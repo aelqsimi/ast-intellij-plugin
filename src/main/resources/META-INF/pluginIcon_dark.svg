@@ -2,7 +2,7 @@
      aria-label="AST Lens dark theme">
     <defs>
         <linearGradient id="g" x1="10" y1="10" x2="55" y2="55" gradientUnits="userSpaceOnUse">
-            <stop stop-color="#5DE6FF"/>
+            <stop offset="0" stop-color="#5DE6FF"/>
             <stop offset=".5" stop-color="#6B7CFF"/>
             <stop offset="1" stop-color="#D56AFF"/>
         </linearGradient>
