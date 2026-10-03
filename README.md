@@ -1,6 +1,18 @@
 # AST Lens — IntelliJ Plugin
 
-AST Lens is a graphical UAST explorer for Java and Kotlin projects, written in Java 25.
+Visualize Java and Kotlin code as AST graphs.
+
+AST Lens helps developers inspect source-code structure directly from the IDE by transforming
+Java and Kotlin syntax trees into visual graphs.
+
+- **Visual AST graphs** — inspect classes, functions, expressions, and syntax hierarchy visually.
+- **Java and Kotlin** — analyze source code across JVM projects.
+- **Structure exploration** — navigate parent/child relationships and understand complex code paths.
+- **IDE workflow** — analyze code without leaving your development environment.
+- **Graph export** — export visualizations as JSON, Mermaid, or Graphviz files.
+
+AST Lens is useful for code exploration, architecture analysis, learning, debugging tooling,
+and understanding unfamiliar codebases.
 
 ## Try the plugin
 

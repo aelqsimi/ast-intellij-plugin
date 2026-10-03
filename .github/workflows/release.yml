@@ -1,0 +1,112 @@
+name: Release
+
+on:
+  release:
+    types: [ prereleased, released ]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Sign and publish plugin
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: jetbrains-marketplace
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Set up Java 25
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: true
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x gradlew
+
+      - name: Validate release secrets
+        env:
+          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+          PRIVATE_KEY_PASSWORD: ${{ secrets.PRIVATE_KEY_PASSWORD }}
+          CERTIFICATE_CHAIN: ${{ secrets.CERTIFICATE_CHAIN }}
+          PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+        run: |
+          missing=0
+          for secret_name in PRIVATE_KEY PRIVATE_KEY_PASSWORD CERTIFICATE_CHAIN PUBLISH_TOKEN; do
+            if [[ -z "${!secret_name:-}" ]]; then
+              echo "::error::Missing required secret: ${secret_name}"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Validate release tag
+        shell: bash
+        run: |
+          project_version="$(./gradlew properties --quiet | sed -n 's/^version: //p' | head -n 1)"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [[ -z "$project_version" || "$tag_version" != "$project_version" ]]; then
+            echo "::error::Release tag '$GITHUB_REF_NAME' does not match Gradle version '$project_version'."
+            exit 1
+          fi
+
+      - name: Build, test and verify compatibility
+        run: >
+          ./gradlew
+          check
+          verifyPluginStructure
+          verifyPlugin
+          --stacktrace
+          --warning-mode all
+
+      - name: Sign and verify plugin archive
+        env:
+          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+          PRIVATE_KEY_PASSWORD: ${{ secrets.PRIVATE_KEY_PASSWORD }}
+          CERTIFICATE_CHAIN: ${{ secrets.CERTIFICATE_CHAIN }}
+        run: >
+          ./gradlew
+          signPlugin
+          verifyPluginSignature
+          --stacktrace
+          --warning-mode all
+
+      - name: Publish to JetBrains Marketplace
+        env:
+          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+          PRIVATE_KEY_PASSWORD: ${{ secrets.PRIVATE_KEY_PASSWORD }}
+          CERTIFICATE_CHAIN: ${{ secrets.CERTIFICATE_CHAIN }}
+          PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+          PUBLISH_CHANNEL: ${{ github.event.release.prerelease && 'beta' || 'default' }}
+        run: >
+          ./gradlew
+          publishPlugin
+          --stacktrace
+          --warning-mode all
+
+      - name: Upload signed archive to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" build/distributions/*-signed.zip --clobber
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ast-lens-${{ github.event.release.tag_name }}
+          path: build/distributions/*-signed.zip
+          if-no-files-found: error
+          retention-days: 30

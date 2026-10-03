@@ -32,3 +32,4 @@ bin/
 ### Mac OS ###
 .DS_Store
 ROADMAP.md
+RELEASE_SECRETS_SETUP.md
