@@ -33,6 +33,8 @@ val integrationTestImplementation = configurations.getByName("integrationTestImp
     extendsFrom(configurations.testImplementation.get())
 }
 
+val pluginVerifierIdeVersion = providers.gradleProperty("pluginVerifierIdeVersion")
+
 dependencies {
     testImplementation("junit:junit:4.13.2")
     integrationTestImplementation(kotlin("stdlib"))
@@ -82,9 +84,13 @@ intellijPlatform {
 
     pluginVerification {
         ides {
-            create(IntelliJPlatformType.IntellijIdea, "2026.2.3")
-            // 2026.3 is currently an EAP release and must be addressed by its build number.
-            create(IntelliJPlatformType.IntellijIdea, "263.4732.28")
+            if (pluginVerifierIdeVersion.isPresent) {
+                create(IntelliJPlatformType.IntellijIdea, pluginVerifierIdeVersion.get())
+            } else {
+                create(IntelliJPlatformType.IntellijIdea, "2026.2.3")
+                // 2026.3 is currently an EAP release and must be addressed by its build number.
+                create(IntelliJPlatformType.IntellijIdea, "263.4732.28")
+            }
         }
     }
 }

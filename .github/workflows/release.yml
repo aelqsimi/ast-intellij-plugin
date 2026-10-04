@@ -24,6 +24,12 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name }}
 
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          sudo apt-get clean
+          df -h /
+
       - name: Set up Java 25
         uses: actions/setup-java@v5
         with:
@@ -34,6 +40,8 @@ jobs:
         uses: gradle/actions/setup-gradle@v6
         with:
           cache-read-only: true
+          gradle-home-cache-excludes: |
+            caches/*/transforms
 
       - name: Make Gradle wrapper executable
         run: chmod +x gradlew
@@ -70,6 +78,7 @@ jobs:
           check
           verifyPluginStructure
           verifyPlugin
+          -Porg.jetbrains.intellij.platform.downloadSources=false
           --stacktrace
           --warning-mode all
 
