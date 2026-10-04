@@ -5,16 +5,14 @@ import com.intellij.openapi.progress.ProgressManager;
 
 import java.awt.*;
 import java.awt.geom.Rectangle2D;
-import java.util.ArrayList;
-import java.util.IdentityHashMap;
+import java.util.*;
 import java.util.List;
-import java.util.Map;
 
 final class AstGraphLayout {
     static final int NODE_WIDTH = 190;
     static final int NODE_HEIGHT = 56;
-    private static final int HORIZONTAL_GAP = 30;
-    private static final int VERTICAL_GAP = 80;
+    private static final int HORIZONTAL_GAP = 20;
+    private static final int VERTICAL_GAP = 60;
     private static final int MARGIN = 35;
     private static final AstGraphLayout EMPTY = new AstGraphLayout(List.of(), List.of(), new Dimension(500, 300));
 
@@ -46,6 +44,41 @@ final class AstGraphLayout {
         return new AstGraphLayout(builder.nodes, builder.edges, new Dimension(width, height));
     }
 
+    private static Map<AstNode, Point> compactPositions(List<AstNode> neighbors) {
+        Map<AstNode, Point> positions = new IdentityHashMap<>();
+        int index = 0;
+        int ring = 1;
+        while (index < neighbors.size()) {
+            int radius = 170 + (ring - 1) * 125;
+            int capacity = Math.max(4, (int) Math.floor(2 * Math.PI * radius / (NODE_WIDTH + 30.0)));
+            int count = Math.min(capacity, neighbors.size() - index);
+            for (int position = 0; position < count; position++) {
+                double angle = -Math.PI / 2 + 2 * Math.PI * position / count;
+                positions.put(neighbors.get(index++), new Point(
+                        (int) Math.round(Math.cos(angle) * radius),
+                        (int) Math.round(Math.sin(angle) * radius)
+                ));
+            }
+            ring++;
+        }
+        return positions;
+    }
+
+    private static Rectangle boundsOf(List<Node> nodes, Set<AstNode> focusedModels) {
+        Rectangle bounds = null;
+        for (Node node : nodes) {
+            if (!focusedModels.contains(node.node())) {
+                continue;
+            }
+            bounds = bounds == null ? node.bounds() : bounds.union(node.bounds());
+        }
+        if (bounds == null) {
+            return new Rectangle();
+        }
+        bounds.grow(45, 45);
+        return bounds;
+    }
+
     List<Node> nodes() {
         return nodes;
     }
@@ -56,6 +89,70 @@ final class AstGraphLayout {
 
     Dimension logicalSize() {
         return new Dimension(logicalSize);
+    }
+
+    Focus focus(AstNode selectedNode) {
+        Node selected = nodes.stream()
+                .filter(node -> node.node() == selectedNode)
+                .findFirst()
+                .orElse(null);
+        if (selected == null) {
+            return new Focus(this, Set.of(), new Rectangle());
+        }
+
+        Set<AstNode> focusedModels = Collections.newSetFromMap(new IdentityHashMap<>());
+        focusedModels.add(selectedNode);
+        List<AstNode> neighbors = new ArrayList<>();
+        for (Edge edge : edges) {
+            if (edge.parent().node() == selectedNode) {
+                if (focusedModels.add(edge.child().node())) {
+                    neighbors.add(edge.child().node());
+                }
+            } else if (edge.child().node() == selectedNode) {
+                if (focusedModels.add(edge.parent().node())) {
+                    neighbors.add(edge.parent().node());
+                }
+            }
+        }
+
+        Map<AstNode, Point> positions = compactPositions(neighbors);
+        Dimension focusedLogicalSize = focusedLogicalSize(positions.values());
+        int centerX = focusedLogicalSize.width / 2 - NODE_WIDTH / 2;
+        int centerY = focusedLogicalSize.height / 2 - NODE_HEIGHT / 2;
+        positions.replaceAll((node, point) -> new Point(centerX + point.x, centerY + point.y));
+        positions.put(selectedNode, new Point(centerX, centerY));
+
+        Map<AstNode, Node> focusedNodesByModel = new IdentityHashMap<>();
+        List<Node> focusedNodes = new ArrayList<>(nodes.size());
+        for (Node node : nodes) {
+            Point position = positions.get(node.node());
+            Node focused = position == null
+                    ? node
+                    : new Node(node.node(), position.x, position.y, node.depth());
+            focusedNodes.add(focused);
+            focusedNodesByModel.put(focused.node(), focused);
+        }
+        List<Edge> focusedEdges = edges.stream()
+                .map(edge -> new Edge(
+                        focusedNodesByModel.get(edge.parent().node()),
+                        focusedNodesByModel.get(edge.child().node())
+                ))
+                .toList();
+        Rectangle bounds = boundsOf(focusedNodes, focusedModels);
+        return new Focus(
+                new AstGraphLayout(focusedNodes, focusedEdges, focusedLogicalSize),
+                Collections.unmodifiableSet(focusedModels),
+                bounds
+        );
+    }
+
+    private Dimension focusedLogicalSize(java.util.Collection<Point> positions) {
+        int horizontalExtent = positions.stream().mapToInt(point -> Math.abs(point.x)).max().orElse(0);
+        int verticalExtent = positions.stream().mapToInt(point -> Math.abs(point.y)).max().orElse(0);
+        return new Dimension(
+                Math.max(logicalSize.width, 2 * (horizontalExtent + NODE_WIDTH / 2 + MARGIN)),
+                Math.max(logicalSize.height, 2 * (verticalExtent + NODE_HEIGHT / 2 + MARGIN))
+        );
     }
 
     record Node(AstNode node, int x, int y, int depth) {
@@ -78,6 +175,17 @@ final class AstGraphLayout {
                     Math.abs(endX - startX) + 16,
                     Math.abs(endY - startY) + 16
             );
+        }
+    }
+
+    record Focus(AstGraphLayout layout, Set<AstNode> nodes, Rectangle bounds) {
+        Focus {
+            bounds = new Rectangle(bounds);
+        }
+
+        @Override
+        public Rectangle bounds() {
+            return new Rectangle(bounds);
         }
     }
 

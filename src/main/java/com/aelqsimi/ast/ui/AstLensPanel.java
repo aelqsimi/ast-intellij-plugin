@@ -57,6 +57,7 @@ public final class AstLensPanel extends JPanel implements Disposable {
     private static final int PROJECT_STRUCTURE_VIEW = 7;
     private static final int PROJECT_CALL_GRAPH_VIEW = 8;
     private static final String INCLUDE_DEPENDENCIES_PROPERTY = "ast.lens.include.project.dependencies";
+    private static final String FOCUS_CONNECTED_NODES_PROPERTY = "ast.lens.focus.connected.nodes";
 
     private final Project project;
     private final UastAnalyzer analyzer = new UastAnalyzer();
@@ -80,8 +81,8 @@ public final class AstLensPanel extends JPanel implements Disposable {
     private final JLabel status = new JLabel(AstLensBundle.message("status.open.file"));
     private final JButton exportButton = new JButton(AstLensBundle.message("button.export"));
     private final JComboBox<String> viewSelector;
-    private final JComboBox<String> relationshipSelector;
     private final JCheckBox includeDependencies;
+    private final JCheckBox focusConnectedNodes;
     private int activeView = STRUCTURE_VIEW;
     private VirtualFile analyzedFile;
     private DependencyAnalysis currentDependencies;
@@ -101,6 +102,12 @@ public final class AstLensPanel extends JPanel implements Disposable {
         );
         includeDependencies.setToolTipText(AstLensBundle.message("analysis.scope.include.dependencies.tooltip"));
         includeDependencies.addActionListener(event -> analysisScopeChanged());
+        focusConnectedNodes = new JCheckBox(
+                AstLensBundle.message("graph.focus.connected.nodes"),
+                PropertiesComponent.getInstance(project).getBoolean(FOCUS_CONNECTED_NODES_PROPERTY, false)
+        );
+        focusConnectedNodes.setToolTipText(AstLensBundle.message("graph.focus.connected.nodes.tooltip"));
+        focusConnectedNodes.addActionListener(event -> focusConnectedNodesChanged());
         structureGraph = new AstGraphCanvas(this::navigateTo);
         callGraph = new CallGraphCanvas(this::navigateToCall);
         classDependencyGraph = new CallGraphCanvas(
@@ -126,6 +133,7 @@ public final class AstLensPanel extends JPanel implements Disposable {
                 "project.node.kind."
         );
         projectCallGraph = new CallGraphCanvas(this::navigateToCall);
+        applyConnectedNodesFocus();
 
         graphContainer.add(ScrollPaneFactory.createScrollPane(structureGraph, true), STRUCTURE_CARD);
         graphContainer.add(ScrollPaneFactory.createScrollPane(callGraph, true), CALL_GRAPH_CARD);
@@ -171,12 +179,26 @@ public final class AstLensPanel extends JPanel implements Disposable {
             graphLayout.show(graphContainer, cardFor(activeView));
             synchronizeWithCurrentCaret();
         });
-        RelationshipQuery[] relationshipQueries = RelationshipQuery.values();
-        relationshipSelector = new JComboBox<>(java.util.Arrays.stream(relationshipQueries)
+        RelationshipQuery[] methodQueries = java.util.Arrays.stream(RelationshipQuery.values())
+                .filter(RelationshipQuery::methodRequired)
+                .toArray(RelationshipQuery[]::new);
+        JComboBox<String> methodRelationshipSelector = new JComboBox<>(java.util.Arrays.stream(methodQueries)
                 .map(query -> AstLensBundle.message(query.messageKey()))
                 .toArray(String[]::new));
-        JButton searchRelationship = new JButton(AstLensBundle.message("button.search.relationship"));
-        searchRelationship.addActionListener(event -> searchRelationship());
+        JButton searchMethods = new JButton(AstLensBundle.message("button.search.methods"));
+        searchMethods.addActionListener(event -> searchRelationship(
+                methodQueries[methodRelationshipSelector.getSelectedIndex()]
+        ));
+        RelationshipQuery[] classQueries = java.util.Arrays.stream(RelationshipQuery.values())
+                .filter(query -> !query.methodRequired())
+                .toArray(RelationshipQuery[]::new);
+        JComboBox<String> classRelationshipSelector = new JComboBox<>(java.util.Arrays.stream(classQueries)
+                .map(query -> AstLensBundle.message(query.messageKey()))
+                .toArray(String[]::new));
+        JButton searchClasses = new JButton(AstLensBundle.message("button.search.classes"));
+        searchClasses.addActionListener(event -> searchRelationship(
+                classQueries[classRelationshipSelector.getSelectedIndex()]
+        ));
         JButton zoomOut = new JButton("−");
         zoomOut.setToolTipText(AstLensBundle.message("button.zoom.out"));
         zoomOut.addActionListener(event -> zoomOut());
@@ -187,25 +209,39 @@ public final class AstLensPanel extends JPanel implements Disposable {
         zoomIn.setToolTipText(AstLensBundle.message("button.zoom.in"));
         zoomIn.addActionListener(event -> zoomIn());
 
-        JPanel controls = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 4));
+        JPanel controls = new JPanel(new ResponsiveWrapLayout(6, 4));
         controls.add(analyze);
         controls.add(analyzeProject);
-        controls.add(includeDependencies);
         controls.add(exportButton);
         controls.add(viewSelector);
         controls.add(zoomOut);
         controls.add(resetZoom);
         controls.add(zoomIn);
-        controls.add(status);
+        controls.add(includeDependencies);
+        controls.add(focusConnectedNodes);
 
-        JPanel relationshipControls = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
-        relationshipControls.add(new JLabel(AstLensBundle.message("relationship.search.label")));
-        relationshipControls.add(relationshipSelector);
-        relationshipControls.add(searchRelationship);
+        JPanel methodSearchControls = new JPanel(new ResponsiveWrapLayout(6, 2));
+        methodSearchControls.add(new JLabel(AstLensBundle.message("relationship.method.search.label")));
+        methodSearchControls.add(methodRelationshipSelector);
+        methodSearchControls.add(searchMethods);
+
+        JPanel classSearchControls = new JPanel(new ResponsiveWrapLayout(6, 2));
+        classSearchControls.add(new JLabel(AstLensBundle.message("relationship.class.search.label")));
+        classSearchControls.add(classRelationshipSelector);
+        classSearchControls.add(searchClasses);
+
+        JPanel toolbar = new JPanel();
+        toolbar.setLayout(new BoxLayout(toolbar, BoxLayout.Y_AXIS));
+        controls.setAlignmentX(Component.LEFT_ALIGNMENT);
+        methodSearchControls.setAlignmentX(Component.LEFT_ALIGNMENT);
+        classSearchControls.setAlignmentX(Component.LEFT_ALIGNMENT);
+        toolbar.add(controls);
+        toolbar.add(methodSearchControls);
+        toolbar.add(classSearchControls);
 
         JPanel header = new JPanel(new BorderLayout());
-        header.add(controls, BorderLayout.NORTH);
-        header.add(relationshipControls, BorderLayout.SOUTH);
+        header.add(toolbar, BorderLayout.CENTER);
+        header.add(status, BorderLayout.SOUTH);
 
         add(header, BorderLayout.NORTH);
         add(graphContainer, BorderLayout.CENTER);
@@ -464,7 +500,9 @@ public final class AstLensPanel extends JPanel implements Disposable {
 
         GraphExporter.Format[] formats = GraphExporter.Format.values();
         String[] options = java.util.Arrays.stream(formats)
-                .map(GraphExporter.Format::displayName)
+                .map(format -> format == GraphExporter.Format.MERMAID_HTML
+                        ? AstLensBundle.message("export.format.mermaid.html")
+                        : format.displayName())
                 .toArray(String[]::new);
         int selected = Messages.showDialog(
                 project,
@@ -630,10 +668,10 @@ public final class AstLensPanel extends JPanel implements Disposable {
         status.setText(AstLensBundle.message("status.unsupported"));
     }
 
-    private void searchRelationship() {
+    private void searchRelationship(RelationshipQuery query) {
         if (DumbService.isDumb(project)) {
             status.setText(AstLensBundle.message("status.indexing"));
-            DumbService.getInstance(project).runWhenSmart(this::searchRelationship);
+            DumbService.getInstance(project).runWhenSmart(() -> searchRelationship(query));
             return;
         }
 
@@ -655,7 +693,6 @@ public final class AstLensPanel extends JPanel implements Disposable {
             showUnsupportedFile();
             return;
         }
-        RelationshipQuery query = RelationshipQuery.values()[relationshipSelector.getSelectedIndex()];
         RelationshipRequest request = new RelationshipRequest(
                 file,
                 editor.getCaretModel().getOffset(),
@@ -755,6 +792,25 @@ public final class AstLensPanel extends JPanel implements Disposable {
         projectCallGraph.setLayout(CallGraphLayout.empty());
         exportButton.setEnabled(false);
         status.setText(AstLensBundle.message("status.analysis.scope.changed"));
+    }
+
+    private void focusConnectedNodesChanged() {
+        PropertiesComponent.getInstance(project).setValue(
+                FOCUS_CONNECTED_NODES_PROPERTY,
+                Boolean.toString(focusConnectedNodes.isSelected())
+        );
+        applyConnectedNodesFocus();
+    }
+
+    private void applyConnectedNodesFocus() {
+        boolean enabled = focusConnectedNodes.isSelected();
+        structureGraph.setFocusConnectedNodes(enabled);
+        callGraph.setFocusConnectedNodes(enabled);
+        classDependencyGraph.setFocusConnectedNodes(enabled);
+        packageDependencyGraph.setFocusConnectedNodes(enabled);
+        relationshipGraph.setFocusConnectedNodes(enabled);
+        projectStructureGraph.setFocusConnectedNodes(enabled);
+        projectCallGraph.setFocusConnectedNodes(enabled);
     }
 
     private void navigateTo(AstNode node) {

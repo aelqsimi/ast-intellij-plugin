@@ -23,7 +23,8 @@ public final class RelationshipAnalyzer {
     private static RelationshipResult result(
             CallGraphNode target,
             Map<String, CallGraphNode> nodes,
-            Map<EdgeKey, Integer> edges
+            Map<EdgeKey, Integer> edges,
+            String edgeLabel
     ) {
         CallGraph graph = new CallGraph(
                 nodes.values().stream().toList(),
@@ -31,11 +32,26 @@ public final class RelationshipAnalyzer {
                         .map(entry -> new CallGraphEdge(
                                 entry.getKey().sourceId(),
                                 entry.getKey().targetId(),
-                                entry.getValue()
+                                entry.getValue(),
+                                edgeLabel
                         ))
                         .toList()
         );
         return new RelationshipResult(graph, target.id(), target.label(), graph.edges().size());
+    }
+
+    private static CallGraph labelEdges(CallGraph graph, String label) {
+        return new CallGraph(
+                graph.nodes(),
+                graph.edges().stream()
+                        .map(edge -> new CallGraphEdge(
+                                edge.sourceId(),
+                                edge.targetId(),
+                                edge.callCount(),
+                                label
+                        ))
+                        .toList()
+        );
     }
 
     private static CallGraph filterGraph(
@@ -219,7 +235,10 @@ public final class RelationshipAnalyzer {
         String targetId = methodId(method);
         CallGraph projectGraph = projectCallGraph(project, scope);
         boolean incoming = query == RelationshipQuery.CALLERS;
-        CallGraph filtered = filterGraph(projectGraph, targetId, incoming, nodeForMethod(method, project));
+        CallGraph filtered = labelEdges(
+                filterGraph(projectGraph, targetId, incoming, nodeForMethod(method, project)),
+                "calls"
+        );
         return new RelationshipResult(
                 filtered,
                 targetId,
@@ -237,6 +256,7 @@ public final class RelationshipAnalyzer {
     ) {
         return switch (query) {
             case DEPENDENT_CLASSES -> dependentClasses(project, psiClass, dependencies.classGraph());
+            case PARENT_CLASSES -> parentClasses(project, psiClass, scope);
             case IMPLEMENTED_INTERFACES -> implementedInterfaces(project, psiClass, scope);
             case INHERITING_CLASSES -> inheritingClasses(project, psiClass);
             default -> throw new IllegalArgumentException("Method relationship expected");
@@ -245,7 +265,10 @@ public final class RelationshipAnalyzer {
 
     private RelationshipResult dependentClasses(Project project, PsiClass targetClass, CallGraph graph) {
         String targetId = classId(targetClass);
-        CallGraph filtered = filterGraph(graph, targetId, true, nodeForClass(targetClass, project));
+        CallGraph filtered = labelEdges(
+                filterGraph(graph, targetId, true, nodeForClass(targetClass, project)),
+                "depends on"
+        );
         return new RelationshipResult(filtered, targetId, classLabel(targetClass), filtered.edges().size());
     }
 
@@ -267,7 +290,36 @@ public final class RelationshipAnalyzer {
             nodes.putIfAbsent(interfaceNode.id(), interfaceNode);
             edges.put(new EdgeKey(target.id(), interfaceNode.id()), 1);
         }
-        return result(target, nodes, edges);
+        return result(target, nodes, edges, "implements");
+    }
+
+    private RelationshipResult parentClasses(
+            Project project,
+            PsiClass targetClass,
+            AnalysisScope scope
+    ) {
+        CallGraphNode target = nodeForClass(targetClass, project);
+        Map<String, CallGraphNode> nodes = new LinkedHashMap<>();
+        nodes.put(target.id(), target);
+        Map<EdgeKey, Integer> edges = new LinkedHashMap<>();
+        Set<String> visited = new HashSet<>();
+        visited.add(target.id());
+        ProjectFileIndex fileIndex = ProjectFileIndex.getInstance(project);
+        PsiClass childClass = targetClass;
+        PsiClass parentClass = targetClass.getSuperClass();
+        while (parentClass != null && scope.includes(fileIndex, parentClass)) {
+            ProgressManager.checkCanceled();
+            CallGraphNode child = nodeForClass(childClass, project);
+            CallGraphNode parent = nodeForClass(parentClass, project);
+            if (!visited.add(parent.id())) {
+                break;
+            }
+            nodes.putIfAbsent(parent.id(), parent);
+            edges.put(new EdgeKey(child.id(), parent.id()), 1);
+            childClass = parentClass;
+            parentClass = parentClass.getSuperClass();
+        }
+        return result(target, nodes, edges, "extends");
     }
 
     private RelationshipResult inheritingClasses(Project project, PsiClass targetClass) {
@@ -287,7 +339,7 @@ public final class RelationshipAnalyzer {
                     edges.put(new EdgeKey(child.id(), target.id()), 1);
                     return true;
                 });
-        return result(target, nodes, edges);
+        return result(target, nodes, edges, "extends");
     }
 
     private CallGraph projectCallGraph(Project project, AnalysisScope scope) {

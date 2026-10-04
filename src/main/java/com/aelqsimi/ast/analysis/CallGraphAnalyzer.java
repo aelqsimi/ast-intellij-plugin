@@ -154,7 +154,8 @@ public final class CallGraphAnalyzer {
                         .map(entry -> new CallGraphEdge(
                                 entry.getKey().sourceId(),
                                 entry.getKey().targetId(),
-                                entry.getValue()
+                                entry.getValue(),
+                                "calls"
                         ))
                         .toList()
         );

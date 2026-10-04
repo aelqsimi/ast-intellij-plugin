@@ -3,6 +3,7 @@ package com.aelqsimi.ast.ui;
 import com.aelqsimi.ast.AstLensBundle;
 import com.aelqsimi.ast.model.AstNode;
 import com.intellij.ui.JBColor;
+import com.intellij.util.concurrency.AppExecutorUtil;
 
 import javax.swing.*;
 import java.awt.*;
@@ -12,6 +13,7 @@ import java.awt.geom.Path2D;
 import java.awt.geom.Rectangle2D;
 import java.awt.geom.RoundRectangle2D;
 import java.util.Comparator;
+import java.util.Set;
 import java.util.function.Consumer;
 
 public final class AstGraphCanvas extends JComponent {
@@ -19,8 +21,14 @@ public final class AstGraphCanvas extends JComponent {
     private static final int NODE_HEIGHT = AstGraphLayout.NODE_HEIGHT;
 
     private final Consumer<AstNode> navigator;
+    private AstGraphLayout baseGraphLayout = AstGraphLayout.empty();
     private AstGraphLayout graphLayout = AstGraphLayout.empty();
     private double zoom = 1.0;
+    private double focusZoom = 1.0;
+    private boolean focusConnectedNodes;
+    private Set<AstNode> focusedNodes = Set.of();
+    private Rectangle focusBounds = new Rectangle();
+    private long focusRequestId;
     private AstNode selectedNode;
 
     public AstGraphCanvas(Consumer<AstNode> navigator) {
@@ -62,15 +70,27 @@ public final class AstGraphCanvas extends JComponent {
     }
 
     void setLayout(AstGraphLayout layout) {
-        graphLayout = layout == null ? AstGraphLayout.empty() : layout;
+        baseGraphLayout = layout == null ? AstGraphLayout.empty() : layout;
+        graphLayout = baseGraphLayout;
+        focusRequestId++;
+        focusedNodes = Set.of();
+        focusBounds = new Rectangle();
+        focusZoom = zoom;
         selectedNode = null;
-        Dimension logicalSize = graphLayout.logicalSize();
-        setPreferredSize(new Dimension(
-                (int) (logicalSize.width * zoom),
-                (int) (logicalSize.height * zoom)
-        ));
-        revalidate();
+        updateCanvasSize();
         repaint();
+    }
+
+    public void setFocusConnectedNodes(boolean enabled) {
+        if (focusConnectedNodes == enabled) {
+            return;
+        }
+        focusConnectedNodes = enabled;
+        if (enabled && selectedNode != null) {
+            requestFocus(selectedNode);
+        } else {
+            restoreBaseLayout();
+        }
     }
 
     public void zoomIn() {
@@ -101,12 +121,13 @@ public final class AstGraphCanvas extends JComponent {
         if (Math.abs(value - zoom) < 0.001) {
             return;
         }
-        double ratio = value / zoom;
         zoom = value;
-        Dimension size = getPreferredSize();
-        setPreferredSize(new Dimension((int) (size.width * ratio), (int) (size.height * ratio)));
-        revalidate();
+        if (!focusedNodes.isEmpty()) {
+            focusZoom = calculateFocusZoom(focusBounds);
+        }
+        updateCanvasSize();
         repaint();
+        revealFocus();
     }
 
     @Override
@@ -114,7 +135,7 @@ public final class AstGraphCanvas extends JComponent {
         super.paintComponent(graphics);
         Rectangle2D visibleArea = visibleArea(graphics.getClipBounds());
         Graphics2D g = (Graphics2D) graphics.create();
-        g.scale(zoom, zoom);
+        g.scale(activeZoom(), activeZoom());
         g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
         g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
 
@@ -132,14 +153,23 @@ public final class AstGraphCanvas extends JComponent {
     private Rectangle2D visibleArea(Rectangle clip) {
         Rectangle effectiveClip = clip == null ? new Rectangle(0, 0, getWidth(), getHeight()) : clip;
         return new Rectangle2D.Double(
-                effectiveClip.x / zoom,
-                effectiveClip.y / zoom,
-                effectiveClip.width / zoom,
-                effectiveClip.height / zoom
+                effectiveClip.x / activeZoom(),
+                effectiveClip.y / activeZoom(),
+                effectiveClip.width / activeZoom(),
+                effectiveClip.height / activeZoom()
         );
     }
 
     private void drawEdge(Graphics2D g, AstGraphLayout.Edge edge) {
+        Composite originalComposite = g.getComposite();
+        boolean focused = isFocusedEdge(edge);
+        if (!focusedNodes.isEmpty() && !focused) {
+            g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.14f));
+        }
+        g.setStroke(new BasicStroke(focused ? 3f : 1.5f));
+        g.setColor(focused
+                ? JBColor.namedColor("Focus.color", new JBColor(0x3574F0, 0x548AF7))
+                : JBColor.namedColor("Component.borderColor", new JBColor(0xA8B3C7, 0x596273)));
         double startX = edge.parent().x() + NODE_WIDTH / 2.0;
         double startY = edge.parent().y() + NODE_HEIGHT;
         double endX = edge.child().x() + NODE_WIDTH / 2.0;
@@ -159,10 +189,16 @@ public final class AstGraphCanvas extends JComponent {
         arrow.lineTo(endX + 5, endY - 8);
         arrow.closePath();
         g.fill(arrow);
+        g.setComposite(originalComposite);
     }
 
     private void drawNode(Graphics2D g, AstGraphLayout.Node visual) {
         AstNode node = visual.node();
+        Composite originalComposite = g.getComposite();
+        boolean connected = focusedNodes.contains(node);
+        if (!focusedNodes.isEmpty() && !connected) {
+            g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.20f));
+        }
         Color fill = colorFor(node.kind());
         RoundRectangle2D box = new RoundRectangle2D.Double(
                 visual.x(),
@@ -175,8 +211,8 @@ public final class AstGraphCanvas extends JComponent {
 
         g.setColor(fill);
         g.fill(box);
-        g.setStroke(new BasicStroke(node == selectedNode ? 3f : 1.5f));
-        g.setColor(node == selectedNode
+        g.setStroke(new BasicStroke(node == selectedNode ? 3.5f : connected ? 2.5f : 1.5f));
+        g.setColor(node == selectedNode || connected
                 ? JBColor.namedColor("Focus.color", new JBColor(0x3574F0, 0x548AF7))
                 : fill.darker());
         g.draw(box);
@@ -188,6 +224,7 @@ public final class AstGraphCanvas extends JComponent {
         g.setFont(originalFont.deriveFont(Math.max(10f, originalFont.getSize2D() - 1f)));
         drawCenteredEllipsized(g, kindLabel(node.kind()), visual.x() + 10, visual.y() + 31, NODE_WIDTH - 20);
         g.setFont(originalFont);
+        g.setComposite(originalComposite);
     }
 
     private void drawCenteredEllipsized(Graphics2D g, String text, int x, int y, int width) {
@@ -217,27 +254,117 @@ public final class AstGraphCanvas extends JComponent {
 
     private void selectNode(AstNode node, boolean scrollToNode) {
         if (selectedNode == node) {
+            if (scrollToNode) {
+                revealSelection(node);
+            }
             return;
         }
         selectedNode = node;
         repaint();
+        if (focusConnectedNodes && node != null) {
+            requestFocus(node);
+            return;
+        }
+        restoreBaseLayout();
         if (!scrollToNode || node == null) {
             return;
         }
+        revealSelection(node);
+    }
+
+    private void revealSelection(AstNode node) {
+        double scale = activeZoom();
         graphLayout.nodes().stream()
                 .filter(visual -> visual.node() == node)
                 .findFirst()
                 .ifPresent(visual -> scrollRectToVisible(new Rectangle(
-                        (int) (visual.x() * zoom) - 20,
-                        (int) (visual.y() * zoom) - 20,
-                        (int) (NODE_WIDTH * zoom) + 40,
-                        (int) (NODE_HEIGHT * zoom) + 40
+                        (int) (visual.x() * scale) - 20,
+                        (int) (visual.y() * scale) - 20,
+                        (int) (NODE_WIDTH * scale) + 40,
+                        (int) (NODE_HEIGHT * scale) + 40
                 )));
+    }
+
+    private void requestFocus(AstNode node) {
+        long requestId = ++focusRequestId;
+        AstGraphLayout sourceLayout = baseGraphLayout;
+        AppExecutorUtil.getAppExecutorService().execute(() -> {
+            AstGraphLayout.Focus focus = sourceLayout.focus(node);
+            SwingUtilities.invokeLater(() -> {
+                if (requestId != focusRequestId || !focusConnectedNodes || selectedNode != node) {
+                    return;
+                }
+                graphLayout = focus.layout();
+                focusedNodes = focus.nodes();
+                focusBounds = focus.bounds();
+                focusZoom = calculateFocusZoom(focusBounds);
+                updateCanvasSize();
+                repaint();
+                revealFocus();
+            });
+        });
+    }
+
+    private void restoreBaseLayout() {
+        focusRequestId++;
+        graphLayout = baseGraphLayout;
+        focusedNodes = Set.of();
+        focusBounds = new Rectangle();
+        focusZoom = zoom;
+        updateCanvasSize();
+        repaint();
+    }
+
+    private boolean isFocusedEdge(AstGraphLayout.Edge edge) {
+        return selectedNode != null
+                && (edge.parent().node() == selectedNode || edge.child().node() == selectedNode);
+    }
+
+    private double activeZoom() {
+        return focusedNodes.isEmpty() ? zoom : focusZoom;
+    }
+
+    private double calculateFocusZoom(Rectangle bounds) {
+        if (bounds.isEmpty()) {
+            return zoom;
+        }
+        Dimension extent = getParent() instanceof JViewport viewport
+                ? viewport.getExtentSize()
+                : getVisibleRect().getSize();
+        if (extent.width <= 0 || extent.height <= 0) {
+            return zoom;
+        }
+        double widthScale = Math.max(1, extent.width - 32) / (double) bounds.width;
+        double heightScale = Math.max(1, extent.height - 32) / (double) bounds.height;
+        return Math.max(0.20, Math.min(zoom, Math.min(widthScale, heightScale)));
+    }
+
+    private void updateCanvasSize() {
+        Dimension logicalSize = graphLayout.logicalSize();
+        double scale = activeZoom();
+        setPreferredSize(new Dimension(
+                (int) Math.ceil(logicalSize.width * scale),
+                (int) Math.ceil(logicalSize.height * scale)
+        ));
+        revalidate();
+    }
+
+    private void revealFocus() {
+        if (focusedNodes.isEmpty() || focusBounds.isEmpty()) {
+            return;
+        }
+        double scale = activeZoom();
+        SwingUtilities.invokeLater(() -> scrollRectToVisible(new Rectangle(
+                (int) Math.floor(focusBounds.x * scale),
+                (int) Math.floor(focusBounds.y * scale),
+                (int) Math.ceil(focusBounds.width * scale),
+                (int) Math.ceil(focusBounds.height * scale)
+        )));
     }
 
     private Point inverseTransform(Point point) {
         try {
-            return new Point((int) (point.x / zoom), (int) (point.y / zoom));
+            return new Point((int) (point.x / activeZoom()), (int) (point.y / activeZoom()));
         } catch (RuntimeException ignored) {
             return point;
         }

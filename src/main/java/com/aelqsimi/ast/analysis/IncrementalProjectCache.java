@@ -256,8 +256,8 @@ public final class IncrementalProjectCache {
     }
 
     private static CoreSnapshot aggregate(List<FileFacts> fileFacts) {
-        LimitedGraph structure = new LimitedGraph(MAX_NODES_PER_GRAPH);
-        LimitedGraph calls = new LimitedGraph(MAX_NODES_PER_GRAPH);
+        LimitedGraph structure = new LimitedGraph(MAX_NODES_PER_GRAPH, "contains");
+        LimitedGraph calls = new LimitedGraph(MAX_NODES_PER_GRAPH, "calls");
         Map<String, CallGraphNode> completeCallNodes = new LinkedHashMap<>();
         Map<EdgeKey, Integer> completeCallEdges = new LinkedHashMap<>();
         Map<String, ClassFact> classes = new LinkedHashMap<>();
@@ -293,7 +293,7 @@ public final class IncrementalProjectCache {
 
         CallGraph classGraph = new CallGraph(
                 classes.values().stream().map(ClassFact::node).toList(),
-                freezeEdges(classEdges)
+                freezeEdges(classEdges, "depends on")
         );
         CallGraph packageGraph = packageGraph(classes, classEdges);
         DependencyAnalysis dependencies = new DependencyAnalysis(
@@ -307,7 +307,7 @@ public final class IncrementalProjectCache {
                 calls.freeze(),
                 new CallGraph(
                         completeCallNodes.values().stream().toList(),
-                        freezeEdges(completeCallEdges)
+                        freezeEdges(completeCallEdges, "calls")
                 ),
                 fileFacts.size(),
                 packages.size(),
@@ -341,7 +341,7 @@ public final class IncrementalProjectCache {
         }
         return new CallGraph(
                 packages.values().stream().map(ClassFact::node).toList(),
-                freezeEdges(edges)
+                freezeEdges(edges, "depends on")
         );
     }
 
@@ -354,12 +354,13 @@ public final class IncrementalProjectCache {
         }
     }
 
-    private static List<CallGraphEdge> freezeEdges(Map<EdgeKey, Integer> edges) {
+    private static List<CallGraphEdge> freezeEdges(Map<EdgeKey, Integer> edges, String label) {
         return edges.entrySet().stream()
                 .map(entry -> new CallGraphEdge(
                         entry.getKey().sourceId(),
                         entry.getKey().targetId(),
-                        entry.getValue()
+                        entry.getValue(),
+                        label
                 ))
                 .toList();
     }
@@ -926,12 +927,14 @@ public final class IncrementalProjectCache {
 
     private static final class LimitedGraph {
         private final int limit;
+        private final String edgeLabel;
         private final Map<String, CallGraphNode> nodes = new LinkedHashMap<>();
         private final Map<EdgeKey, Integer> edges = new LinkedHashMap<>();
         private boolean truncated;
 
-        private LimitedGraph(int limit) {
+        private LimitedGraph(int limit, String edgeLabel) {
             this.limit = limit;
+            this.edgeLabel = edgeLabel;
         }
 
         private void addNode(CallGraphNode node) {
@@ -963,7 +966,7 @@ public final class IncrementalProjectCache {
         }
 
         private CallGraph freeze() {
-            return new CallGraph(nodes.values().stream().toList(), freezeEdges(edges));
+            return new CallGraph(nodes.values().stream().toList(), freezeEdges(edges, edgeLabel));
         }
     }
 }

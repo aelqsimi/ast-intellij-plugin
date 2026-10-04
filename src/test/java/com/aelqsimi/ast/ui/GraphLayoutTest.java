@@ -9,6 +9,7 @@ import org.junit.Test;
 import java.awt.*;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -100,5 +101,92 @@ public class GraphLayoutTest {
         } finally {
             executor.shutdownNow();
         }
+    }
+
+    @Test
+    public void astFocusKeepsTheSelectedNeighborhoodTogether() {
+        AstNode root = astTree();
+        AstNode selected = root.children().getFirst();
+        AstGraphLayout layout = AstGraphLayout.calculate(root);
+
+        AstGraphLayout.Focus focus = layout.focus(selected);
+
+        assertEquals(layout.nodes().size(), focus.layout().nodes().size());
+        assertEquals(7, focus.nodes().size());
+        AstGraphLayout.Node selectedVisual = focus.layout().nodes().stream()
+                .filter(node -> node.node() == selected)
+                .findFirst()
+                .orElseThrow();
+        assertEquals(
+                focus.layout().logicalSize().width / 2 - AstGraphLayout.NODE_WIDTH / 2,
+                selectedVisual.x()
+        );
+        assertTrue(focus.bounds().contains(selectedVisual.bounds()));
+    }
+
+    @Test
+    public void callGraphFocusHighlightsAndCompactsDirectNeighbors() {
+        List<CallGraphNode> nodes = new ArrayList<>();
+        List<CallGraphEdge> edges = new ArrayList<>();
+        for (int index = 0; index < 12; index++) {
+            nodes.add(new CallGraphNode(
+                    "method-" + index,
+                    "method" + index + "()",
+                    CallGraphNode.Kind.INTERNAL,
+                    null,
+                    index * 10,
+                    index * 10 + 5
+            ));
+            edges.add(new CallGraphEdge(
+                    "method-" + index,
+                    "method-" + ((index + 1) % 12),
+                    1
+            ));
+        }
+        CallGraphLayout layout = CallGraphLayout.calculate(new CallGraph(nodes, edges));
+
+        CallGraphLayout.Focus focus = layout.focus("method-0");
+
+        assertEquals(Set.of("method-0", "method-1", "method-11"), focus.nodeIds());
+        assertEquals(layout.nodes().size(), focus.layout().nodes().size());
+        CallGraphLayout.Node selected = focus.layout().nodes().stream()
+                .filter(node -> node.node().id().equals("method-0"))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(
+                focus.layout().logicalSize().width / 2 - CallGraphLayout.NODE_WIDTH / 2,
+                selected.x()
+        );
+        assertTrue(focus.bounds().contains(selected.bounds()));
+    }
+
+    @Test
+    public void largeCallGraphUsesCompactConcentricRings() {
+        List<CallGraphNode> nodes = new ArrayList<>();
+        List<CallGraphEdge> edges = new ArrayList<>();
+        for (int index = 0; index < 500; index++) {
+            nodes.add(new CallGraphNode(
+                    "method-" + index,
+                    "method" + index + "()",
+                    CallGraphNode.Kind.INTERNAL,
+                    null,
+                    index,
+                    index + 1
+            ));
+            if (index > 0) {
+                edges.add(new CallGraphEdge("method-0", "method-" + index, 1));
+            }
+        }
+
+        CallGraphLayout layout = CallGraphLayout.calculate(new CallGraph(nodes, edges));
+        CallGraphLayout.Node hub = layout.nodes().stream()
+                .filter(node -> node.node().id().equals("method-0"))
+                .findFirst()
+                .orElseThrow();
+
+        assertEquals(layout.logicalSize().width / 2 - CallGraphLayout.NODE_WIDTH / 2, hub.x());
+        assertEquals(layout.logicalSize().height / 2 - CallGraphLayout.NODE_HEIGHT / 2, hub.y());
+        assertTrue("The old single ring was wider than 48,000 px", layout.logicalSize().width < 10_000);
+        assertTrue("The old single ring was taller than 48,000 px", layout.logicalSize().height < 10_000);
     }
 }
