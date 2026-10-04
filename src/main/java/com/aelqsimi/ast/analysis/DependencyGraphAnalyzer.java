@@ -6,6 +6,10 @@ import org.jetbrains.annotations.NotNull;
 
 public final class DependencyGraphAnalyzer {
     public DependencyAnalysis analyze(@NotNull Project project) {
-        return IncrementalProjectCache.getInstance(project).snapshot().dependencies();
+        return analyze(project, AnalysisScope.PROJECT_AND_DEPENDENCIES);
+    }
+
+    public DependencyAnalysis analyze(@NotNull Project project, @NotNull AnalysisScope scope) {
+        return IncrementalProjectCache.getInstance(project).snapshot(scope).dependencies();
     }
 }

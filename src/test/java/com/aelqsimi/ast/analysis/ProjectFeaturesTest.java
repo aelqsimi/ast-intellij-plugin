@@ -1,16 +1,21 @@
 package com.aelqsimi.ast.analysis;
 
-import com.aelqsimi.ast.model.CallGraph;
-import com.aelqsimi.ast.model.CodeHealthIssue;
-import com.aelqsimi.ast.model.CodeHealthReport;
-import com.aelqsimi.ast.model.DependencyAnalysis;
-import com.aelqsimi.ast.model.RelationshipQuery;
-import com.aelqsimi.ast.model.RelationshipResult;
+import com.aelqsimi.ast.model.*;
 import com.intellij.openapi.application.ReadAction;
 import com.intellij.psi.PsiFile;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
 
 public final class ProjectFeaturesTest extends BasePlatformTestCase {
+    private static void assertEdge(CallGraph graph, String sourceId, String targetId) {
+        assertTrue(graph.edges().stream().anyMatch(edge ->
+                edge.sourceId().equals(sourceId) && edge.targetId().equals(targetId)));
+    }
+
+    private static void assertGraphContainsLabel(CallGraph graph, String label) {
+        assertNotNull(graph);
+        assertTrue(graph.nodes().stream().anyMatch(node -> node.label().equals(label)));
+    }
+
     public void testClassAndPackageDependenciesAndCycles() {
         myFixture.addFileToProject(
                 "src/alpha/Alpha.java",
@@ -151,6 +156,26 @@ public final class ProjectFeaturesTest extends BasePlatformTestCase {
         assertGraphContainsLabel(dependents.graph(), "Consumer");
     }
 
+    public void testJdkTypesAreExcludedFromProjectDependencies() {
+        myFixture.addFileToProject(
+                "src/demo/UsesJdk.java",
+                """
+                        package demo;
+                        class UsesJdk {
+                            String value;
+                        }
+                        """
+        );
+
+        IncrementalProjectCache.Snapshot snapshot = ReadAction.computeBlocking(() ->
+                IncrementalProjectCache.getInstance(getProject()).snapshot(
+                        AnalysisScope.PROJECT_AND_DEPENDENCIES
+                ));
+
+        assertFalse(snapshot.dependencies().classGraph().nodes().stream().anyMatch(node ->
+                node.id().equals("java.lang.String")));
+    }
+
     private RelationshipResult analyze(
             RelationshipAnalyzer analyzer,
             PsiFile file,
@@ -160,15 +185,5 @@ public final class ProjectFeaturesTest extends BasePlatformTestCase {
     ) {
         return ReadAction.computeBlocking(() ->
                 analyzer.analyze(getProject(), file, offset, query, dependencies));
-    }
-
-    private static void assertEdge(CallGraph graph, String sourceId, String targetId) {
-        assertTrue(graph.edges().stream().anyMatch(edge ->
-                edge.sourceId().equals(sourceId) && edge.targetId().equals(targetId)));
-    }
-
-    private static void assertGraphContainsLabel(CallGraph graph, String label) {
-        assertNotNull(graph);
-        assertTrue(graph.nodes().stream().anyMatch(node -> node.label().equals(label)));
     }
 }

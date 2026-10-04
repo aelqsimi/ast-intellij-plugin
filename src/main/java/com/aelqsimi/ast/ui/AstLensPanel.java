@@ -4,6 +4,7 @@ import com.aelqsimi.ast.AstLensBundle;
 import com.aelqsimi.ast.analysis.*;
 import com.aelqsimi.ast.export.GraphExporter;
 import com.aelqsimi.ast.model.*;
+import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.application.ReadAction;
 import com.intellij.openapi.diagnostic.Logger;
@@ -55,6 +56,7 @@ public final class AstLensPanel extends JPanel implements Disposable {
     private static final int CODE_HEALTH_VIEW = 6;
     private static final int PROJECT_STRUCTURE_VIEW = 7;
     private static final int PROJECT_CALL_GRAPH_VIEW = 8;
+    private static final String INCLUDE_DEPENDENCIES_PROPERTY = "ast.lens.include.project.dependencies";
 
     private final Project project;
     private final UastAnalyzer analyzer = new UastAnalyzer();
@@ -79,6 +81,7 @@ public final class AstLensPanel extends JPanel implements Disposable {
     private final JButton exportButton = new JButton(AstLensBundle.message("button.export"));
     private final JComboBox<String> viewSelector;
     private final JComboBox<String> relationshipSelector;
+    private final JCheckBox includeDependencies;
     private int activeView = STRUCTURE_VIEW;
     private VirtualFile analyzedFile;
     private DependencyAnalysis currentDependencies;
@@ -92,6 +95,12 @@ public final class AstLensPanel extends JPanel implements Disposable {
         super(new BorderLayout());
         getAccessibleContext().setAccessibleName("AST Lens content");
         this.project = project;
+        includeDependencies = new JCheckBox(
+                AstLensBundle.message("analysis.scope.include.dependencies"),
+                PropertiesComponent.getInstance(project).getBoolean(INCLUDE_DEPENDENCIES_PROPERTY, true)
+        );
+        includeDependencies.setToolTipText(AstLensBundle.message("analysis.scope.include.dependencies.tooltip"));
+        includeDependencies.addActionListener(event -> analysisScopeChanged());
         structureGraph = new AstGraphCanvas(this::navigateTo);
         callGraph = new CallGraphCanvas(this::navigateToCall);
         classDependencyGraph = new CallGraphCanvas(
@@ -181,6 +190,7 @@ public final class AstLensPanel extends JPanel implements Disposable {
         JPanel controls = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 4));
         controls.add(analyze);
         controls.add(analyzeProject);
+        controls.add(includeDependencies);
         controls.add(exportButton);
         controls.add(viewSelector);
         controls.add(zoomOut);
@@ -257,11 +267,12 @@ public final class AstLensPanel extends JPanel implements Disposable {
             return;
         }
 
-        PsiFile psiFile = PsiManager.getInstance(project).findFile(file);
+        PsiFile psiFile = findPsiFile(file);
         if (psiFile == null) {
             showUnsupportedFile();
             return;
         }
+        AnalysisScope scope = analysisScope();
 
         status.setText(AstLensBundle.message("status.analyzing", file.getName()));
         new Task.Backgroundable(
@@ -286,13 +297,13 @@ public final class AstLensPanel extends JPanel implements Disposable {
                         indicator,
                         0.20,
                         "progress.phase.calls",
-                        () -> callGraphAnalyzer.analyze(psiFile)
+                        () -> callGraphAnalyzer.analyze(psiFile, scope)
                 );
                 DependencyAnalysis dependencies = readPhase(
                         indicator,
                         0.38,
                         "progress.phase.dependencies",
-                        () -> dependencyGraphAnalyzer.analyze(project)
+                        () -> dependencyGraphAnalyzer.analyze(project, scope)
                 );
                 SyntaxComparison comparison = readPhase(
                         indicator,
@@ -304,7 +315,7 @@ public final class AstLensPanel extends JPanel implements Disposable {
                         indicator,
                         0.72,
                         "progress.phase.health",
-                        () -> codeHealthAnalyzer.analyze(project, dependencies)
+                        () -> codeHealthAnalyzer.analyze(project, dependencies, scope)
                 );
 
                 updateProgress(indicator, 0.84, "progress.phase.layout");
@@ -324,7 +335,9 @@ public final class AstLensPanel extends JPanel implements Disposable {
 
             @Override
             public void onSuccess() {
-                showResult(result);
+                if (scope == analysisScope()) {
+                    showResult(result);
+                }
             }
 
             @Override
@@ -346,6 +359,7 @@ public final class AstLensPanel extends JPanel implements Disposable {
             return;
         }
 
+        AnalysisScope scope = analysisScope();
         status.setText(AstLensBundle.message("status.analyzing.project"));
         new Task.Backgroundable(
                 project,
@@ -360,19 +374,19 @@ public final class AstLensPanel extends JPanel implements Disposable {
                         indicator,
                         0.05,
                         "progress.phase.project",
-                        () -> projectAnalyzer.analyze(project)
+                        () -> projectAnalyzer.analyze(project, scope)
                 );
                 DependencyAnalysis dependencies = readPhase(
                         indicator,
                         0.48,
                         "progress.phase.dependencies",
-                        () -> dependencyGraphAnalyzer.analyze(project)
+                        () -> dependencyGraphAnalyzer.analyze(project, scope)
                 );
                 CodeHealthReport health = readPhase(
                         indicator,
                         0.68,
                         "progress.phase.health",
-                        () -> codeHealthAnalyzer.analyze(project, dependencies)
+                        () -> codeHealthAnalyzer.analyze(project, dependencies, scope)
                 );
 
                 updateProgress(indicator, 0.80, "progress.phase.layout");
@@ -390,7 +404,9 @@ public final class AstLensPanel extends JPanel implements Disposable {
 
             @Override
             public void onSuccess() {
-                showProjectResult(result);
+                if (scope == analysisScope()) {
+                    showProjectResult(result);
+                }
             }
 
             @Override
@@ -634,7 +650,7 @@ public final class AstLensPanel extends JPanel implements Disposable {
             return;
         }
 
-        PsiFile psiFile = PsiManager.getInstance(project).findFile(file);
+        PsiFile psiFile = findPsiFile(file);
         if (psiFile == null) {
             showUnsupportedFile();
             return;
@@ -646,6 +662,7 @@ public final class AstLensPanel extends JPanel implements Disposable {
                 query
         );
         DependencyAnalysis dependencies = currentAnalysis.dependencies();
+        AnalysisScope scope = analysisScope();
         status.setText(AstLensBundle.message("relationship.searching"));
         new Task.Backgroundable(
                 project,
@@ -665,7 +682,8 @@ public final class AstLensPanel extends JPanel implements Disposable {
                                 psiFile,
                                 request.offset(),
                                 request.query(),
-                                dependencies
+                                dependencies,
+                                scope
                         )
                 );
                 updateProgress(indicator, 0.80, "progress.phase.layout");
@@ -681,7 +699,9 @@ public final class AstLensPanel extends JPanel implements Disposable {
 
             @Override
             public void onSuccess() {
-                showRelationshipResult(response);
+                if (scope == analysisScope()) {
+                    showRelationshipResult(response);
+                }
             }
 
             @Override
@@ -698,6 +718,43 @@ public final class AstLensPanel extends JPanel implements Disposable {
                 );
             }
         }.queue();
+    }
+
+    private PsiFile findPsiFile(VirtualFile file) {
+        return ReadAction.computeBlocking(() -> file.isValid()
+                ? PsiManager.getInstance(project).findFile(file)
+                : null);
+    }
+
+    private AnalysisScope analysisScope() {
+        return includeDependencies.isSelected()
+                ? AnalysisScope.PROJECT_AND_DEPENDENCIES
+                : AnalysisScope.PROJECT_ONLY;
+    }
+
+    private void analysisScopeChanged() {
+        PropertiesComponent.getInstance(project).setValue(
+                INCLUDE_DEPENDENCIES_PROPERTY,
+                Boolean.toString(includeDependencies.isSelected())
+        );
+        analyzedFile = null;
+        currentAnalysis = null;
+        currentDependencies = null;
+        currentRelationship = null;
+        currentRelationshipQuery = null;
+        currentCodeHealth = null;
+        currentProjectAnalysis = null;
+        structureGraph.setLayout(AstGraphLayout.empty());
+        callGraph.setLayout(CallGraphLayout.empty());
+        classDependencyGraph.setLayout(CallGraphLayout.empty());
+        packageDependencyGraph.setLayout(CallGraphLayout.empty());
+        relationshipGraph.setLayout(CallGraphLayout.empty());
+        syntaxComparisonPanel.setComparison(null);
+        codeHealthPanel.setReport(null);
+        projectStructureGraph.setLayout(CallGraphLayout.empty());
+        projectCallGraph.setLayout(CallGraphLayout.empty());
+        exportButton.setEnabled(false);
+        status.setText(AstLensBundle.message("status.analysis.scope.changed"));
     }
 
     private void navigateTo(AstNode node) {

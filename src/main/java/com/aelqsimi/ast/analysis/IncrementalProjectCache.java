@@ -32,6 +32,7 @@ public final class IncrementalProjectCache {
     private long fullScanCount;
     private long fastPathHitCount;
     private CoreSnapshot aggregated;
+    private AnalysisScope analysisScope = AnalysisScope.PROJECT_AND_DEPENDENCIES;
 
     public IncrementalProjectCache(Project project) {
         this.project = project;
@@ -84,7 +85,11 @@ public final class IncrementalProjectCache {
         return sourceFiles;
     }
 
-    private static FileFacts analyzeFile(PsiFile psiFile, ProjectFileIndex fileIndex) {
+    private static FileFacts analyzeFile(
+            PsiFile psiFile,
+            ProjectFileIndex fileIndex,
+            AnalysisScope analysisScope
+    ) {
         VirtualFile file = psiFile.getVirtualFile();
         UFile uFile = file == null ? null : UastContextKt.toUElement(psiFile, UFile.class);
         if (uFile == null || file == null) {
@@ -187,21 +192,34 @@ public final class IncrementalProjectCache {
             public boolean visitCallExpression(@NotNull UCallExpression call) {
                 PsiMethod resolved = call.resolve();
                 if (!currentMethods.isEmpty()) {
-                    CallGraphNode target = resolved == null
-                            ? unresolvedCallNode(call)
-                            : methodNode(resolved, fileIndex);
-                    facts.mergeCallNode(target);
-                    facts.callEdges.merge(
-                            new EdgeKey(currentMethods.peek(), target.id()),
-                            1,
-                            Integer::sum
-                    );
+                    if (resolved == null) {
+                        CallGraphNode target = unresolvedCallNode(call);
+                        facts.mergeCallNode(target);
+                        facts.callEdges.merge(
+                                new EdgeKey(currentMethods.peek(), target.id()),
+                                1,
+                                Integer::sum
+                        );
+                    } else if (analysisScope.includes(fileIndex, resolved)) {
+                        CallGraphNode target = methodNode(resolved, fileIndex);
+                        facts.mergeCallNode(target);
+                        facts.callEdges.merge(
+                                new EdgeKey(currentMethods.peek(), target.id()),
+                                1,
+                                Integer::sum
+                        );
+                    }
                 }
                 if (resolved == null) {
                     facts.hasUnresolvedReferences = true;
                 }
                 if (resolved != null) {
-                    facts.addDependency(currentClasses, resolved.getContainingClass(), fileIndex);
+                    facts.addDependency(
+                            currentClasses,
+                            resolved.getContainingClass(),
+                            fileIndex,
+                            analysisScope
+                    );
                 }
                 return false;
             }
@@ -212,7 +230,7 @@ public final class IncrementalProjectCache {
                 if (target == null) {
                     facts.hasUnresolvedReferences = true;
                 }
-                facts.addDependency(currentClasses, target, fileIndex);
+                facts.addDependency(currentClasses, target, fileIndex, analysisScope);
                 return false;
             }
 
@@ -230,7 +248,7 @@ public final class IncrementalProjectCache {
                 PsiClass target = resolved instanceof PsiClass psiClass
                         ? psiClass
                         : resolved instanceof PsiMember member ? member.getContainingClass() : null;
-                facts.addDependency(currentClasses, target, fileIndex);
+                facts.addDependency(currentClasses, target, fileIndex, analysisScope);
                 return false;
             }
         });
@@ -526,7 +544,18 @@ public final class IncrementalProjectCache {
     }
 
     public synchronized Snapshot snapshot() {
+        return snapshot(AnalysisScope.PROJECT_AND_DEPENDENCIES);
+    }
+
+    public synchronized Snapshot snapshot(AnalysisScope requestedScope) {
         ProgressManager.checkCanceled();
+        if (analysisScope != requestedScope) {
+            files.clear();
+            aggregated = null;
+            rootModificationCount = -1;
+            psiModificationCount = -1;
+            analysisScope = requestedScope;
+        }
         long currentRootCount = ProjectRootModificationTracker.getInstance(project).getModificationCount();
         long currentPsiCount = PsiModificationTracker.getInstance(project).getModificationCount();
         if (aggregated != null
@@ -613,7 +642,7 @@ public final class IncrementalProjectCache {
             nextFiles.put(file, new CachedFile(
                     psiFile.getModificationStamp(),
                     file.getPath(),
-                    analyzeFile(psiFile, fileIndex)
+                    analyzeFile(psiFile, fileIndex, analysisScope)
             ));
             reanalyzedFiles++;
             changed = true;
@@ -831,9 +860,12 @@ public final class IncrementalProjectCache {
         private void addDependency(
                 Deque<String> currentClasses,
                 PsiClass targetClass,
-                ProjectFileIndex fileIndex
+                ProjectFileIndex fileIndex,
+                AnalysisScope analysisScope
         ) {
-            if (currentClasses.isEmpty() || targetClass == null) {
+            if (currentClasses.isEmpty()
+                    || targetClass == null
+                    || !analysisScope.includes(fileIndex, targetClass)) {
                 return;
             }
             ClassFact target = classFact(targetClass, fileIndex);

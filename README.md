@@ -45,6 +45,11 @@ produces a package → file → class → method hierarchy and a project-wide ca
 updating dependency and code-health results. Each project graph is limited to 750 nodes to
 keep the IDE responsive; counters still cover the entire project.
 
+The **Include project dependencies** option controls the analysis boundary. Project sources
+are always included. When enabled, declared Gradle, Maven, and JAR libraries are included as
+well; JDK/SDK symbols such as `java.lang.String` and undeclared external files are always
+excluded. Disable the option to restrict every graph to project sources only.
+
 Project-wide analysis uses a shared incremental per-file cache. It recalculates only files
 whose PSI `modificationStamp` changed, their semantic dependants, and files containing
 unresolved references. SDK, library, and project-root changes invalidate the complete cache.
