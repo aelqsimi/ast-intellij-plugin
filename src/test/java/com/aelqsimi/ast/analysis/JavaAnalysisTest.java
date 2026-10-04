@@ -9,19 +9,26 @@ import com.intellij.testFramework.fixtures.BasePlatformTestCase;
 import java.util.List;
 
 public final class JavaAnalysisTest extends BasePlatformTestCase {
+    private static List<AstNode> flatten(AstNode node) {
+        return java.util.stream.Stream.concat(
+                java.util.stream.Stream.of(node),
+                node.children().stream().flatMap(child -> flatten(child).stream())
+        ).toList();
+    }
+
     public void testJavaStructureAndCalls() {
         myFixture.configureByText(
                 "Sample.java",
                 """
                         package demo;
-
+                        
                         class Sample {
                             private int value = 1;
-
+                        
                             void first() {
                                 second();
                             }
-
+                        
                             void second() {
                             }
                         }
@@ -58,10 +65,26 @@ public final class JavaAnalysisTest extends BasePlatformTestCase {
                 edge.sourceId().equals(firstId) && edge.targetId().equals(secondId)));
     }
 
-    private static List<AstNode> flatten(AstNode node) {
-        return java.util.stream.Stream.concat(
-                java.util.stream.Stream.of(node),
-                node.children().stream().flatMap(child -> flatten(child).stream())
-        ).toList();
+    public void testJdkCallsAreExcludedFromRestrictedScopes() {
+        myFixture.configureByText(
+                "UsesJdk.java",
+                """
+                        package demo;
+                        
+                        class UsesJdk {
+                            void print() {
+                                System.out.println("AST Lens");
+                            }
+                        }
+                        """
+        );
+
+        for (AnalysisScope scope : AnalysisScope.values()) {
+            CallGraph calls = ReadAction.computeBlocking(() ->
+                    new CallGraphAnalyzer().analyze(myFixture.getFile(), scope));
+
+            assertFalse(calls.nodes().stream().anyMatch(node ->
+                    node.id().startsWith("java.io.PrintStream#println(")));
+        }
     }
 }

@@ -6,6 +6,10 @@ import org.jetbrains.annotations.NotNull;
 
 public final class ProjectAnalyzer {
     public ProjectAnalysis analyze(@NotNull Project project) {
-        return IncrementalProjectCache.getInstance(project).snapshot().projectAnalysis();
+        return analyze(project, AnalysisScope.PROJECT_AND_DEPENDENCIES);
+    }
+
+    public ProjectAnalysis analyze(@NotNull Project project, @NotNull AnalysisScope scope) {
+        return IncrementalProjectCache.getInstance(project).snapshot(scope).projectAnalysis();
     }
 }

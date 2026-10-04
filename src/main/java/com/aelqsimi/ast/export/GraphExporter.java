@@ -1,13 +1,6 @@
 package com.aelqsimi.ast.export;
 
-import com.aelqsimi.ast.model.AstNode;
-import com.aelqsimi.ast.model.CallGraph;
-import com.aelqsimi.ast.model.CallGraphEdge;
-import com.aelqsimi.ast.model.CallGraphNode;
-import com.aelqsimi.ast.model.CodeHealthIssue;
-import com.aelqsimi.ast.model.CodeHealthReport;
-import com.aelqsimi.ast.model.SyntaxComparison;
-import com.aelqsimi.ast.model.SyntaxTreeNode;
+import com.aelqsimi.ast.model.*;
 
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
@@ -21,6 +14,7 @@ public final class GraphExporter {
         return switch (format) {
             case JSON -> structureJson(root);
             case MERMAID -> structureMermaid(root);
+            case MERMAID_HTML -> largeMermaidHtml("AST Lens Structure", structureMermaid(root));
             case GRAPHVIZ -> structureGraphviz(root);
         };
     }
@@ -29,6 +23,7 @@ public final class GraphExporter {
         return switch (format) {
             case JSON -> directedJson(graph, title);
             case MERMAID -> directedMermaid(graph, title);
+            case MERMAID_HTML -> largeMermaidHtml(title, directedMermaid(graph, title));
             case GRAPHVIZ -> directedGraphviz(graph, title);
         };
     }
@@ -37,6 +32,7 @@ public final class GraphExporter {
         return switch (format) {
             case JSON -> comparisonJson(comparison);
             case MERMAID -> comparisonMermaid(comparison);
+            case MERMAID_HTML -> largeMermaidHtml("PSI / UAST", comparisonMermaid(comparison));
             case GRAPHVIZ -> comparisonGraphviz(comparison);
         };
     }
@@ -45,8 +41,54 @@ public final class GraphExporter {
         return switch (format) {
             case JSON -> codeHealthJson(report);
             case MERMAID -> codeHealthMermaid(report);
+            case MERMAID_HTML -> largeMermaidHtml("AST Lens Code Health", codeHealthMermaid(report));
             case GRAPHVIZ -> codeHealthGraphviz(report);
         };
+    }
+
+    private static String largeMermaidHtml(String title, String diagram) {
+        int edgeCount = diagram.lines()
+                .mapToInt(line -> line.contains(" -->") || line.contains(" -.->") ? 1 : 0)
+                .sum();
+        int maxEdges = Math.max(1_000, edgeCount + 100);
+        int maxTextSize = Math.max(100_000, diagram.length() + 10_000);
+        return """
+                <!doctype html>
+                <html lang="en">
+                <head>
+                  <meta charset="utf-8">
+                  <meta name="viewport" content="width=device-width, initial-scale=1">
+                  <title>%s</title>
+                  <style>
+                    html, body { margin: 0; min-width: 100%%; min-height: 100%%; background: #fff; }
+                    body { font-family: system-ui, sans-serif; overflow: auto; }
+                    main { box-sizing: border-box; min-width: 100vw; min-height: 100vh; padding: 24px; text-align: center; }
+                    .mermaid { display: inline-block; margin: 0 auto; text-align: left; }
+                    #error { color: #b00020; white-space: pre-wrap; }
+                  </style>
+                </head>
+                <body>
+                  <main>
+                    <div id="error" role="alert"></div>
+                    <pre class="mermaid">%s</pre>
+                  </main>
+                  <script type="module">
+                    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@12.1.0/dist/mermaid.esm.min.mjs';
+                    mermaid.initialize({
+                      startOnLoad: false,
+                      maxEdges: %d,
+                      maxTextSize: %d,
+                      layout: 'dagre',
+                      flowchart: { nodeSpacing: 20, rankSpacing: 30, useMaxWidth: false }
+                    });
+                    mermaid.run().catch(error => {
+                      document.getElementById('error').textContent =
+                        'Unable to render the Mermaid graph: ' + (error?.message ?? error);
+                    });
+                  </script>
+                </body>
+                </html>
+                """.formatted(html(title), html(diagram), maxEdges, maxTextSize);
     }
 
     private static String structureJson(AstNode root) {
@@ -106,6 +148,7 @@ public final class GraphExporter {
             output.append("    {\"source\": ").append(json(edge.sourceId()))
                     .append(", \"target\": ").append(json(edge.targetId()))
                     .append(", \"count\": ").append(edge.callCount())
+                    .append(", \"label\": ").append(json(edge.label()))
                     .append('}')
                     .append(index + 1 == graph.edges().size() ? "\n" : ",\n");
         }
@@ -179,9 +222,10 @@ public final class GraphExporter {
                     .append(mermaid(node.label())).append("\"]\n");
         }
         for (CallGraphEdge edge : graph.edges()) {
-            String count = edge.callCount() > 1 ? "|×" + edge.callCount() + "|" : "";
+            String label = edgeDisplayLabel(edge);
+            String mermaidLabel = label.isEmpty() ? "" : "|" + mermaid(label) + "|";
             output.append("  ").append(ids.get(edge.sourceId())).append(" -->")
-                    .append(count).append(' ').append(ids.get(edge.targetId())).append('\n');
+                    .append(mermaidLabel).append(' ').append(ids.get(edge.targetId())).append('\n');
         }
         return output.toString();
     }
@@ -250,8 +294,9 @@ public final class GraphExporter {
         for (CallGraphEdge edge : graph.edges()) {
             output.append("  ").append(ids.get(edge.sourceId())).append(" -> ")
                     .append(ids.get(edge.targetId()));
-            if (edge.callCount() > 1) {
-                output.append(" [label=").append(dot("×" + edge.callCount())).append(']');
+            String label = edgeDisplayLabel(edge);
+            if (!label.isEmpty()) {
+                output.append(" [label=").append(dot(label)).append(']');
             }
             output.append(";\n");
         }
@@ -433,6 +478,23 @@ public final class GraphExporter {
                 .replace("\r", " ").replace("\n", " ");
     }
 
+    private static String edgeDisplayLabel(CallGraphEdge edge) {
+        if (edge.label().isBlank()) {
+            return edge.callCount() > 1 ? "×" + edge.callCount() : "";
+        }
+        return edge.callCount() > 1
+                ? edge.label() + " ×" + edge.callCount()
+                : edge.label();
+    }
+
+    private static String html(String value) {
+        return value == null ? "" : value.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;")
+                .replace("'", "&#39;");
+    }
+
     private static String dot(String value) {
         return json(value == null ? "" : value);
     }
@@ -440,6 +502,7 @@ public final class GraphExporter {
     public enum Format {
         JSON("JSON", "json"),
         MERMAID("Mermaid", "mmd"),
+        MERMAID_HTML("Mermaid HTML (large graph)", "html"),
         GRAPHVIZ("Graphviz", "dot");
 
         private final String displayName;

@@ -1,16 +1,21 @@
 package com.aelqsimi.ast.analysis;
 
-import com.aelqsimi.ast.model.CallGraph;
-import com.aelqsimi.ast.model.CodeHealthIssue;
-import com.aelqsimi.ast.model.CodeHealthReport;
-import com.aelqsimi.ast.model.DependencyAnalysis;
-import com.aelqsimi.ast.model.RelationshipQuery;
-import com.aelqsimi.ast.model.RelationshipResult;
+import com.aelqsimi.ast.model.*;
 import com.intellij.openapi.application.ReadAction;
 import com.intellij.psi.PsiFile;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
 
 public final class ProjectFeaturesTest extends BasePlatformTestCase {
+    private static void assertEdge(CallGraph graph, String sourceId, String targetId) {
+        assertTrue(graph.edges().stream().anyMatch(edge ->
+                edge.sourceId().equals(sourceId) && edge.targetId().equals(targetId)));
+    }
+
+    private static void assertGraphContainsLabel(CallGraph graph, String label) {
+        assertNotNull(graph);
+        assertTrue(graph.nodes().stream().anyMatch(node -> node.label().equals(label)));
+    }
+
     public void testClassAndPackageDependenciesAndCycles() {
         myFixture.addFileToProject(
                 "src/alpha/Alpha.java",
@@ -99,7 +104,9 @@ public final class ProjectFeaturesTest extends BasePlatformTestCase {
                 """
                         package demo;
                         interface Contract {}
-                        public class Target implements Contract {
+                        class GrandParent {}
+                        class Parent extends GrandParent {}
+                        public class Target extends Parent implements Contract {
                             public void caller() { called(); }
                             public void called() {}
                         }
@@ -116,7 +123,7 @@ public final class ProjectFeaturesTest extends BasePlatformTestCase {
         RelationshipAnalyzer analyzer = new RelationshipAnalyzer();
         int calledOffset = targetFile.getText().indexOf("called() {}");
         int callerOffset = targetFile.getText().indexOf("caller()");
-        int targetOffset = targetFile.getText().indexOf("Target implements");
+        int targetOffset = targetFile.getText().indexOf("Target extends");
 
         RelationshipResult callers = analyze(analyzer, targetFile, calledOffset, RelationshipQuery.CALLERS, dependencies);
         RelationshipResult callees = analyze(analyzer, targetFile, callerOffset, RelationshipQuery.CALLEES, dependencies);
@@ -125,6 +132,13 @@ public final class ProjectFeaturesTest extends BasePlatformTestCase {
                 targetFile,
                 targetOffset,
                 RelationshipQuery.IMPLEMENTED_INTERFACES,
+                dependencies
+        );
+        RelationshipResult parents = analyze(
+                analyzer,
+                targetFile,
+                targetOffset,
+                RelationshipQuery.PARENT_CLASSES,
                 dependencies
         );
         RelationshipResult inheritors = analyze(
@@ -147,8 +161,36 @@ public final class ProjectFeaturesTest extends BasePlatformTestCase {
         assertNotNull(callees);
         assertEquals(1, callees.relationCount());
         assertGraphContainsLabel(interfaces.graph(), "Contract");
+        assertTrue(interfaces.graph().edges().stream().allMatch(edge -> edge.label().equals("implements")));
+        assertGraphContainsLabel(parents.graph(), "Parent");
+        assertGraphContainsLabel(parents.graph(), "GrandParent");
+        assertEquals(2, parents.relationCount());
+        assertTrue(parents.graph().edges().stream().allMatch(edge -> edge.label().equals("extends")));
         assertGraphContainsLabel(inheritors.graph(), "Child");
+        assertTrue(inheritors.graph().edges().stream().allMatch(edge -> edge.label().equals("extends")));
         assertGraphContainsLabel(dependents.graph(), "Consumer");
+        assertTrue(dependents.graph().edges().stream().allMatch(edge -> edge.label().equals("depends on")));
+        assertTrue(callers.graph().edges().stream().allMatch(edge -> edge.label().equals("calls")));
+    }
+
+    public void testJdkTypesAreExcludedFromProjectDependencies() {
+        myFixture.addFileToProject(
+                "src/demo/UsesJdk.java",
+                """
+                        package demo;
+                        class UsesJdk {
+                            String value;
+                        }
+                        """
+        );
+
+        IncrementalProjectCache.Snapshot snapshot = ReadAction.computeBlocking(() ->
+                IncrementalProjectCache.getInstance(getProject()).snapshot(
+                        AnalysisScope.PROJECT_AND_DEPENDENCIES
+                ));
+
+        assertFalse(snapshot.dependencies().classGraph().nodes().stream().anyMatch(node ->
+                node.id().equals("java.lang.String")));
     }
 
     private RelationshipResult analyze(
@@ -160,15 +202,5 @@ public final class ProjectFeaturesTest extends BasePlatformTestCase {
     ) {
         return ReadAction.computeBlocking(() ->
                 analyzer.analyze(getProject(), file, offset, query, dependencies));
-    }
-
-    private static void assertEdge(CallGraph graph, String sourceId, String targetId) {
-        assertTrue(graph.edges().stream().anyMatch(edge ->
-                edge.sourceId().equals(sourceId) && edge.targetId().equals(targetId)));
-    }
-
-    private static void assertGraphContainsLabel(CallGraph graph, String label) {
-        assertNotNull(graph);
-        assertTrue(graph.nodes().stream().anyMatch(node -> node.label().equals(label)));
     }
 }

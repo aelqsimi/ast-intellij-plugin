@@ -4,13 +4,10 @@ import com.aelqsimi.ast.AstLensBundle;
 import com.aelqsimi.ast.model.CallGraph;
 import com.aelqsimi.ast.model.CallGraphEdge;
 import com.aelqsimi.ast.model.CallGraphNode;
+import com.intellij.openapi.roots.ProjectFileIndex;
 import com.intellij.openapi.util.TextRange;
 import com.intellij.openapi.vfs.VirtualFile;
-import com.intellij.psi.PsiClass;
-import com.intellij.psi.PsiElement;
-import com.intellij.psi.PsiFile;
-import com.intellij.psi.PsiMethod;
-import com.intellij.psi.PsiParameter;
+import com.intellij.psi.*;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.uast.UCallExpression;
 import org.jetbrains.uast.UFile;
@@ -18,15 +15,68 @@ import org.jetbrains.uast.UMethod;
 import org.jetbrains.uast.UastContextKt;
 import org.jetbrains.uast.visitor.AbstractUastVisitor;
 
-import java.util.ArrayDeque;
-import java.util.Arrays;
-import java.util.Deque;
-import java.util.LinkedHashMap;
-import java.util.Map;
+import java.util.*;
 import java.util.stream.Collectors;
 
 public final class CallGraphAnalyzer {
+    private static MutableNode createResolvedNode(PsiMethod method, ProjectFileIndex fileIndex) {
+        MutableNode node = new MutableNode(
+                methodId(method),
+                methodLabel(method),
+                CallGraphNode.Kind.EXTERNAL
+        );
+        updateNavigation(node, method, fileIndex);
+        return node;
+    }
+
+    private static void updateNavigation(MutableNode node, PsiMethod method, ProjectFileIndex fileIndex) {
+        PsiElement navigation = method.getNavigationElement();
+        SourceLocation location = sourceLocation(navigation);
+        PsiFile containingFile = navigation.getContainingFile();
+        VirtualFile file = containingFile == null ? null : containingFile.getVirtualFile();
+        if (file != null) {
+            node.file = file;
+            node.startOffset = location.startOffset();
+            node.endOffset = location.endOffset();
+            if (fileIndex.isInContent(file)) {
+                node.kind = CallGraphNode.Kind.INTERNAL;
+            }
+        }
+    }
+
+    private static String methodId(PsiMethod method) {
+        PsiClass owner = method.getContainingClass();
+        String ownerName = owner == null
+                ? "<top-level>"
+                : owner.getQualifiedName() == null ? owner.getName() : owner.getQualifiedName();
+        String parameters = Arrays.stream(method.getParameterList().getParameters())
+                .map(PsiParameter::getType)
+                .map(type -> type.getCanonicalText(false))
+                .collect(Collectors.joining(","));
+        return ownerName + "#" + method.getName() + "(" + parameters + ")";
+    }
+
+    private static String methodLabel(PsiMethod method) {
+        PsiClass owner = method.getContainingClass();
+        String ownerName = owner == null || owner.getName() == null ? "" : owner.getName() + ".";
+        return ownerName + method.getName() + "()";
+    }
+
+    private static SourceLocation sourceLocation(PsiElement element) {
+        if (element == null) {
+            return new SourceLocation(-1, -1);
+        }
+        TextRange range = element.getTextRange();
+        return range == null
+                ? new SourceLocation(-1, -1)
+                : new SourceLocation(range.getStartOffset(), range.getEndOffset());
+    }
+
     public CallGraph analyze(@NotNull PsiFile psiFile) {
+        return analyze(psiFile, AnalysisScope.PROJECT_AND_DEPENDENCIES);
+    }
+
+    public CallGraph analyze(@NotNull PsiFile psiFile, @NotNull AnalysisScope scope) {
         UFile uFile = UastContextKt.toUElement(psiFile, UFile.class);
         if (uFile == null || psiFile.getVirtualFile() == null) {
             return new CallGraph(java.util.List.of(), java.util.List.of());
@@ -36,6 +86,7 @@ public final class CallGraphAnalyzer {
         Map<EdgeKey, Integer> edges = new LinkedHashMap<>();
         Deque<String> currentMethods = new ArrayDeque<>();
         VirtualFile analyzedFile = psiFile.getVirtualFile();
+        ProjectFileIndex fileIndex = ProjectFileIndex.getInstance(psiFile.getProject());
 
         uFile.accept(new AbstractUastVisitor() {
             @Override
@@ -80,12 +131,15 @@ public final class CallGraphAnalyzer {
                             ignored -> new MutableNode(targetId, label, CallGraphNode.Kind.UNRESOLVED)
                     );
                 } else {
+                    if (!scope.includes(fileIndex, resolved)) {
+                        return false;
+                    }
                     targetId = methodId(resolved);
                     MutableNode target = nodes.computeIfAbsent(
                             targetId,
-                            ignored -> createResolvedNode(resolved, analyzedFile)
+                            ignored -> createResolvedNode(resolved, fileIndex)
                     );
-                    updateNavigation(target, resolved, analyzedFile);
+                    updateNavigation(target, resolved, fileIndex);
                 }
 
                 EdgeKey edge = new EdgeKey(currentMethods.peek(), targetId);
@@ -100,63 +154,11 @@ public final class CallGraphAnalyzer {
                         .map(entry -> new CallGraphEdge(
                                 entry.getKey().sourceId(),
                                 entry.getKey().targetId(),
-                                entry.getValue()
+                                entry.getValue(),
+                                "calls"
                         ))
                         .toList()
         );
-    }
-
-    private static MutableNode createResolvedNode(PsiMethod method, VirtualFile analyzedFile) {
-        MutableNode node = new MutableNode(
-                methodId(method),
-                methodLabel(method),
-                CallGraphNode.Kind.EXTERNAL
-        );
-        updateNavigation(node, method, analyzedFile);
-        return node;
-    }
-
-    private static void updateNavigation(MutableNode node, PsiMethod method, VirtualFile analyzedFile) {
-        PsiElement navigation = method.getNavigationElement();
-        SourceLocation location = sourceLocation(navigation);
-        PsiFile containingFile = navigation.getContainingFile();
-        VirtualFile file = containingFile == null ? null : containingFile.getVirtualFile();
-        if (file != null) {
-            node.file = file;
-            node.startOffset = location.startOffset();
-            node.endOffset = location.endOffset();
-            if (file.equals(analyzedFile)) {
-                node.kind = CallGraphNode.Kind.INTERNAL;
-            }
-        }
-    }
-
-    private static String methodId(PsiMethod method) {
-        PsiClass owner = method.getContainingClass();
-        String ownerName = owner == null
-                ? "<top-level>"
-                : owner.getQualifiedName() == null ? owner.getName() : owner.getQualifiedName();
-        String parameters = Arrays.stream(method.getParameterList().getParameters())
-                .map(PsiParameter::getType)
-                .map(type -> type.getCanonicalText(false))
-                .collect(Collectors.joining(","));
-        return ownerName + "#" + method.getName() + "(" + parameters + ")";
-    }
-
-    private static String methodLabel(PsiMethod method) {
-        PsiClass owner = method.getContainingClass();
-        String ownerName = owner == null || owner.getName() == null ? "" : owner.getName() + ".";
-        return ownerName + method.getName() + "()";
-    }
-
-    private static SourceLocation sourceLocation(PsiElement element) {
-        if (element == null) {
-            return new SourceLocation(-1, -1);
-        }
-        TextRange range = element.getTextRange();
-        return range == null
-                ? new SourceLocation(-1, -1)
-                : new SourceLocation(range.getStartOffset(), range.getEndOffset());
     }
 
     private record EdgeKey(String sourceId, String targetId) {
