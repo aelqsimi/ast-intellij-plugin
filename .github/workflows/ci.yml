@@ -15,13 +15,19 @@ concurrency:
 
 jobs:
   validate:
-    name: Build, test and verify
+    name: Build and test
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          sudo apt-get clean
+          df -h /
 
       - name: Set up Java 25
         uses: actions/setup-java@v5
@@ -31,6 +37,11 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-cleanup: always
+          gradle-home-cache-strict-match: true
+          gradle-home-cache-excludes: |
+            caches/*/transforms
 
       # gradlew n’est actuellement pas marqué exécutable dans Git.
       - name: Make Gradle wrapper executable
@@ -42,19 +53,20 @@ jobs:
           check
           verifyPluginStructure
           buildPlugin
+          -Porg.jetbrains.intellij.platform.downloadSources=false
           --stacktrace
           --warning-mode all
+
+      - name: Report disk usage before integration tests
+        run: |
+          df -h /
+          du -sh ~/.gradle/caches .intellijPlatform build 2>/dev/null || true
 
       - name: Run integration tests
         run: >
           xvfb-run --auto-servernum
           ./gradlew integrationTest
-          --stacktrace
-          --warning-mode all
-
-      - name: Verify IntelliJ compatibility
-        run: >
-          ./gradlew verifyPlugin
+          -Porg.jetbrains.intellij.platform.downloadSources=false
           --stacktrace
           --warning-mode all
 
@@ -77,5 +89,67 @@ jobs:
             build/test-results/**
             .intellijPlatform/**/log/**
           include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 14
+
+  compatibility:
+    name: Verify IntelliJ IDEA ${{ matrix.ide }}
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        ide:
+          - "2026.2.3"
+          - "263.4732.28"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          sudo apt-get clean
+          df -h /
+
+      - name: Set up Java 25
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-cleanup: always
+          gradle-home-cache-strict-match: true
+          gradle-home-cache-excludes: |
+            caches/*/transforms
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x gradlew
+
+      - name: Verify plugin compatibility
+        run: >
+          ./gradlew verifyPlugin
+          -PpluginVerifierIdeVersion=${{ matrix.ide }}
+          -Porg.jetbrains.intellij.platform.downloadSources=false
+          --stacktrace
+          --warning-mode all
+
+      - name: Report final disk usage
+        if: always()
+        run: |
+          df -h /
+          du -sh ~/.gradle/caches .intellijPlatform build 2>/dev/null || true
+
+      - name: Upload Plugin Verifier report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-verifier-${{ matrix.ide }}
+          path: build/reports/pluginVerifier/**
           if-no-files-found: ignore
           retention-days: 14
