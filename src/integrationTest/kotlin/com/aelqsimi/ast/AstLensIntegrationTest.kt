@@ -9,6 +9,7 @@ import com.intellij.ide.starter.ci.CIServer
 import com.intellij.ide.starter.ci.NoCIServer
 import com.intellij.ide.starter.di.di
 import com.intellij.ide.starter.driver.engine.runIdeWithDriver
+import com.intellij.ide.starter.ide.IDETestContext
 import com.intellij.ide.starter.models.IdeInfo
 import com.intellij.ide.starter.models.TestCase
 import com.intellij.ide.starter.plugins.PluginConfigurator
@@ -21,6 +22,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.fail
 import org.kodein.di.DI
 import org.kodein.di.bindSingleton
+import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.Path
 import kotlin.time.Duration.Companion.minutes
@@ -56,6 +58,7 @@ class AstLensIntegrationTest {
             "ast-lens-plugin-startup",
             TestCase(IdeInfo.IdeaUltimate, NoProject).withVersion("2026.2.3"),
         ).apply {
+            useStableTestTheme()
             PluginConfigurator(this).installPluginFromPath(pluginPath)
         }.runIdeWithDriver().useDriverAndCloseIde { }
     }
@@ -67,6 +70,7 @@ class AstLensIntegrationTest {
             "ast-lens-open-tool-window",
             TestCase(IdeInfo.IdeaUltimate, LocalProjectInfo(projectPath)).withVersion("2026.2.3"),
         ).apply {
+            useStableTestTheme()
             PluginConfigurator(this).installPluginFromPath(pluginPath)
         }.runIdeWithDriver().useDriverAndCloseIde {
             waitForIndicators(5.minutes)
@@ -78,5 +82,30 @@ class AstLensIntegrationTest {
                 }
             }
         }
+    }
+
+    private fun IDETestContext.useStableTestTheme() {
+        val optionsDirectory = paths.configDir.resolve("options")
+        Files.createDirectories(optionsDirectory)
+        Files.writeString(
+            optionsDirectory.resolve("laf.xml"),
+            """
+            <application>
+              <component name="LafManager" autodetect="false">
+                <laf class-name="com.intellij.ide.ui.laf.darcula.DarculaLaf" themeId="Islands Darcula" />
+              </component>
+            </application>
+            """.trimIndent(),
+        )
+        Files.writeString(
+            optionsDirectory.resolve("colors.scheme.xml"),
+            """
+            <application>
+              <component name="EditorColorsManagerImpl">
+                <global_color_scheme name="Darcula" />
+              </component>
+            </application>
+            """.trimIndent(),
+        )
     }
 }
