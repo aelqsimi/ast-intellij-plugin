@@ -2,6 +2,8 @@
 
 AST Lens is a graphical UAST explorer for Java and Kotlin projects, written in Java 25.
 
+![ATS Lens Image](https://github.com/aelqsimi/ast-intellij-plugin/blob/develop/ASTLens%20.png?raw=true)
+
 ## Try the plugin
 
 1. Open the project in IntelliJ IDEA.
