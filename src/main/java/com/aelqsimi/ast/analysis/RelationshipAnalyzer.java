@@ -1,21 +1,12 @@
 package com.aelqsimi.ast.analysis;
 
-import com.aelqsimi.ast.model.CallGraph;
-import com.aelqsimi.ast.model.CallGraphEdge;
-import com.aelqsimi.ast.model.CallGraphNode;
-import com.aelqsimi.ast.model.DependencyAnalysis;
-import com.aelqsimi.ast.model.RelationshipQuery;
-import com.aelqsimi.ast.model.RelationshipResult;
+import com.aelqsimi.ast.model.*;
 import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.roots.ProjectFileIndex;
 import com.intellij.openapi.util.TextRange;
 import com.intellij.openapi.vfs.VirtualFile;
-import com.intellij.psi.PsiClass;
-import com.intellij.psi.PsiElement;
-import com.intellij.psi.PsiFile;
-import com.intellij.psi.PsiMethod;
-import com.intellij.psi.PsiParameter;
+import com.intellij.psi.*;
 import com.intellij.psi.search.GlobalSearchScope;
 import com.intellij.psi.search.searches.ClassInheritorsSearch;
 import org.jetbrains.annotations.NotNull;
@@ -25,106 +16,15 @@ import org.jetbrains.uast.UMethod;
 import org.jetbrains.uast.UastContextKt;
 import org.jetbrains.uast.visitor.AbstractUastVisitor;
 
-import java.util.Arrays;
-import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.stream.Collectors;
 
 public final class RelationshipAnalyzer {
-    public RelationshipResult analyze(
-            @NotNull Project project,
-            @NotNull PsiFile psiFile,
-            int offset,
-            @NotNull RelationshipQuery query,
-            @NotNull DependencyAnalysis dependencies
-    ) {
-        Selection selection = findSelection(psiFile, offset);
-        if (query.methodRequired()) {
-            return selection.method() == null
-                    ? null
-                    : analyzeMethod(project, selection.method(), query);
-        }
-        return selection.psiClass() == null
-                ? null
-                : analyzeClass(project, selection.psiClass(), query, dependencies);
-    }
-
-    private RelationshipResult analyzeMethod(
-            Project project,
-            PsiMethod method,
-            RelationshipQuery query
-    ) {
-        String targetId = methodId(method);
-        CallGraph projectGraph = projectCallGraph(project);
-        boolean incoming = query == RelationshipQuery.CALLERS;
-        CallGraph filtered = filterGraph(projectGraph, targetId, incoming, nodeForMethod(method, project));
-        return new RelationshipResult(
-                filtered,
-                targetId,
-                methodLabel(method),
-                filtered.edges().size()
-        );
-    }
-
-    private RelationshipResult analyzeClass(
-            Project project,
-            PsiClass psiClass,
-            RelationshipQuery query,
-            DependencyAnalysis dependencies
-    ) {
-        return switch (query) {
-            case DEPENDENT_CLASSES -> dependentClasses(project, psiClass, dependencies.classGraph());
-            case IMPLEMENTED_INTERFACES -> implementedInterfaces(project, psiClass);
-            case INHERITING_CLASSES -> inheritingClasses(project, psiClass);
-            default -> throw new IllegalArgumentException("Method relationship expected");
-        };
-    }
-
-    private RelationshipResult dependentClasses(Project project, PsiClass targetClass, CallGraph graph) {
-        String targetId = classId(targetClass);
-        CallGraph filtered = filterGraph(graph, targetId, true, nodeForClass(targetClass, project));
-        return new RelationshipResult(filtered, targetId, classLabel(targetClass), filtered.edges().size());
-    }
-
-    private RelationshipResult implementedInterfaces(Project project, PsiClass targetClass) {
-        CallGraphNode target = nodeForClass(targetClass, project);
-        Map<String, CallGraphNode> nodes = new LinkedHashMap<>();
-        nodes.put(target.id(), target);
-        Map<EdgeKey, Integer> edges = new LinkedHashMap<>();
-        for (PsiClass psiInterface : targetClass.getInterfaces()) {
-            CallGraphNode interfaceNode = nodeForClass(psiInterface, project);
-            nodes.putIfAbsent(interfaceNode.id(), interfaceNode);
-            edges.put(new EdgeKey(target.id(), interfaceNode.id()), 1);
-        }
-        return result(target, nodes, edges);
-    }
-
-    private RelationshipResult inheritingClasses(Project project, PsiClass targetClass) {
-        CallGraphNode target = nodeForClass(targetClass, project);
-        Map<String, CallGraphNode> nodes = new LinkedHashMap<>();
-        nodes.put(target.id(), target);
-        Map<EdgeKey, Integer> edges = new LinkedHashMap<>();
-        ClassInheritorsSearch.search(
-                        targetClass,
-                        GlobalSearchScope.projectScope(project),
-                        true
-                )
-                .forEach(inheritor -> {
-                    ProgressManager.checkCanceled();
-                    CallGraphNode child = nodeForClass(inheritor, project);
-                    nodes.putIfAbsent(child.id(), child);
-                    edges.put(new EdgeKey(child.id(), target.id()), 1);
-                    return true;
-                });
-        return result(target, nodes, edges);
-    }
-
     private static RelationshipResult result(
             CallGraphNode target,
             Map<String, CallGraphNode> nodes,
-            Map<EdgeKey, Integer> edges
+            Map<EdgeKey, Integer> edges,
+            String edgeLabel
     ) {
         CallGraph graph = new CallGraph(
                 nodes.values().stream().toList(),
@@ -132,11 +32,26 @@ public final class RelationshipAnalyzer {
                         .map(entry -> new CallGraphEdge(
                                 entry.getKey().sourceId(),
                                 entry.getKey().targetId(),
-                                entry.getValue()
+                                entry.getValue(),
+                                edgeLabel
                         ))
                         .toList()
         );
         return new RelationshipResult(graph, target.id(), target.label(), graph.edges().size());
+    }
+
+    private static CallGraph labelEdges(CallGraph graph, String label) {
+        return new CallGraph(
+                graph.nodes(),
+                graph.edges().stream()
+                        .map(edge -> new CallGraphEdge(
+                                edge.sourceId(),
+                                edge.targetId(),
+                                edge.callCount(),
+                                label
+                        ))
+                        .toList()
+        );
     }
 
     private static CallGraph filterGraph(
@@ -172,10 +87,6 @@ public final class RelationshipAnalyzer {
         }
         selectedNodes.putIfAbsent(targetId, fallbackTarget);
         return new CallGraph(selectedNodes.values().stream().toList(), selectedEdges);
-    }
-
-    private CallGraph projectCallGraph(Project project) {
-        return IncrementalProjectCache.getInstance(project).snapshot().completeCallGraph();
     }
 
     private static Selection findSelection(PsiFile psiFile, int offset) {
@@ -277,6 +188,162 @@ public final class RelationshipAnalyzer {
         return range == null
                 ? new SourceRange(-1, -1)
                 : new SourceRange(range.getStartOffset(), range.getEndOffset());
+    }
+
+    public RelationshipResult analyze(
+            @NotNull Project project,
+            @NotNull PsiFile psiFile,
+            int offset,
+            @NotNull RelationshipQuery query,
+            @NotNull DependencyAnalysis dependencies
+    ) {
+        return analyze(
+                project,
+                psiFile,
+                offset,
+                query,
+                dependencies,
+                AnalysisScope.PROJECT_AND_DEPENDENCIES
+        );
+    }
+
+    public RelationshipResult analyze(
+            @NotNull Project project,
+            @NotNull PsiFile psiFile,
+            int offset,
+            @NotNull RelationshipQuery query,
+            @NotNull DependencyAnalysis dependencies,
+            @NotNull AnalysisScope scope
+    ) {
+        Selection selection = findSelection(psiFile, offset);
+        if (query.methodRequired()) {
+            return selection.method() == null
+                    ? null
+                    : analyzeMethod(project, selection.method(), query, scope);
+        }
+        return selection.psiClass() == null
+                ? null
+                : analyzeClass(project, selection.psiClass(), query, dependencies, scope);
+    }
+
+    private RelationshipResult analyzeMethod(
+            Project project,
+            PsiMethod method,
+            RelationshipQuery query,
+            AnalysisScope scope
+    ) {
+        String targetId = methodId(method);
+        CallGraph projectGraph = projectCallGraph(project, scope);
+        boolean incoming = query == RelationshipQuery.CALLERS;
+        CallGraph filtered = labelEdges(
+                filterGraph(projectGraph, targetId, incoming, nodeForMethod(method, project)),
+                "calls"
+        );
+        return new RelationshipResult(
+                filtered,
+                targetId,
+                methodLabel(method),
+                filtered.edges().size()
+        );
+    }
+
+    private RelationshipResult analyzeClass(
+            Project project,
+            PsiClass psiClass,
+            RelationshipQuery query,
+            DependencyAnalysis dependencies,
+            AnalysisScope scope
+    ) {
+        return switch (query) {
+            case DEPENDENT_CLASSES -> dependentClasses(project, psiClass, dependencies.classGraph());
+            case PARENT_CLASSES -> parentClasses(project, psiClass, scope);
+            case IMPLEMENTED_INTERFACES -> implementedInterfaces(project, psiClass, scope);
+            case INHERITING_CLASSES -> inheritingClasses(project, psiClass);
+            default -> throw new IllegalArgumentException("Method relationship expected");
+        };
+    }
+
+    private RelationshipResult dependentClasses(Project project, PsiClass targetClass, CallGraph graph) {
+        String targetId = classId(targetClass);
+        CallGraph filtered = labelEdges(
+                filterGraph(graph, targetId, true, nodeForClass(targetClass, project)),
+                "depends on"
+        );
+        return new RelationshipResult(filtered, targetId, classLabel(targetClass), filtered.edges().size());
+    }
+
+    private RelationshipResult implementedInterfaces(
+            Project project,
+            PsiClass targetClass,
+            AnalysisScope scope
+    ) {
+        CallGraphNode target = nodeForClass(targetClass, project);
+        Map<String, CallGraphNode> nodes = new LinkedHashMap<>();
+        nodes.put(target.id(), target);
+        Map<EdgeKey, Integer> edges = new LinkedHashMap<>();
+        ProjectFileIndex fileIndex = ProjectFileIndex.getInstance(project);
+        for (PsiClass psiInterface : targetClass.getInterfaces()) {
+            if (!scope.includes(fileIndex, psiInterface)) {
+                continue;
+            }
+            CallGraphNode interfaceNode = nodeForClass(psiInterface, project);
+            nodes.putIfAbsent(interfaceNode.id(), interfaceNode);
+            edges.put(new EdgeKey(target.id(), interfaceNode.id()), 1);
+        }
+        return result(target, nodes, edges, "implements");
+    }
+
+    private RelationshipResult parentClasses(
+            Project project,
+            PsiClass targetClass,
+            AnalysisScope scope
+    ) {
+        CallGraphNode target = nodeForClass(targetClass, project);
+        Map<String, CallGraphNode> nodes = new LinkedHashMap<>();
+        nodes.put(target.id(), target);
+        Map<EdgeKey, Integer> edges = new LinkedHashMap<>();
+        Set<String> visited = new HashSet<>();
+        visited.add(target.id());
+        ProjectFileIndex fileIndex = ProjectFileIndex.getInstance(project);
+        PsiClass childClass = targetClass;
+        PsiClass parentClass = targetClass.getSuperClass();
+        while (parentClass != null && scope.includes(fileIndex, parentClass)) {
+            ProgressManager.checkCanceled();
+            CallGraphNode child = nodeForClass(childClass, project);
+            CallGraphNode parent = nodeForClass(parentClass, project);
+            if (!visited.add(parent.id())) {
+                break;
+            }
+            nodes.putIfAbsent(parent.id(), parent);
+            edges.put(new EdgeKey(child.id(), parent.id()), 1);
+            childClass = parentClass;
+            parentClass = parentClass.getSuperClass();
+        }
+        return result(target, nodes, edges, "extends");
+    }
+
+    private RelationshipResult inheritingClasses(Project project, PsiClass targetClass) {
+        CallGraphNode target = nodeForClass(targetClass, project);
+        Map<String, CallGraphNode> nodes = new LinkedHashMap<>();
+        nodes.put(target.id(), target);
+        Map<EdgeKey, Integer> edges = new LinkedHashMap<>();
+        ClassInheritorsSearch.search(
+                        targetClass,
+                        GlobalSearchScope.projectScope(project),
+                        true
+                )
+                .forEach(inheritor -> {
+                    ProgressManager.checkCanceled();
+                    CallGraphNode child = nodeForClass(inheritor, project);
+                    nodes.putIfAbsent(child.id(), child);
+                    edges.put(new EdgeKey(child.id(), target.id()), 1);
+                    return true;
+                });
+        return result(target, nodes, edges, "extends");
+    }
+
+    private CallGraph projectCallGraph(Project project, AnalysisScope scope) {
+        return IncrementalProjectCache.getInstance(project).snapshot(scope).completeCallGraph();
     }
 
     private record Selection(PsiMethod method, PsiClass psiClass) {

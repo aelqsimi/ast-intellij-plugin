@@ -1,40 +1,23 @@
 package com.aelqsimi.ast.ui;
 
 import com.aelqsimi.ast.AstLensBundle;
-import com.aelqsimi.ast.analysis.CallGraphAnalyzer;
-import com.aelqsimi.ast.analysis.CodeHealthAnalyzer;
-import com.aelqsimi.ast.analysis.DependencyGraphAnalyzer;
-import com.aelqsimi.ast.analysis.ProjectAnalyzer;
-import com.aelqsimi.ast.analysis.RelationshipAnalyzer;
-import com.aelqsimi.ast.analysis.SyntaxComparisonAnalyzer;
-import com.aelqsimi.ast.analysis.UastAnalyzer;
+import com.aelqsimi.ast.analysis.*;
 import com.aelqsimi.ast.export.GraphExporter;
-import com.aelqsimi.ast.model.AstAnalysisResult;
-import com.aelqsimi.ast.model.AstNode;
-import com.aelqsimi.ast.model.CallGraph;
-import com.aelqsimi.ast.model.CallGraphNode;
-import com.aelqsimi.ast.model.CodeHealthIssue;
-import com.aelqsimi.ast.model.CodeHealthReport;
-import com.aelqsimi.ast.model.DependencyAnalysis;
-import com.aelqsimi.ast.model.ProjectAnalysis;
-import com.aelqsimi.ast.model.RelationshipQuery;
-import com.aelqsimi.ast.model.RelationshipResult;
-import com.aelqsimi.ast.model.SyntaxComparison;
-import com.aelqsimi.ast.model.SyntaxTreeNode;
+import com.aelqsimi.ast.model.*;
+import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.Disposable;
-import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.application.ReadAction;
+import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.editor.Editor;
 import com.intellij.openapi.editor.EditorFactory;
 import com.intellij.openapi.editor.event.CaretEvent;
 import com.intellij.openapi.editor.event.CaretListener;
-import com.intellij.openapi.fileEditor.FileDocumentManager;
-import com.intellij.openapi.fileEditor.FileEditorManagerEvent;
-import com.intellij.openapi.fileEditor.FileEditorManagerListener;
-import com.intellij.openapi.fileEditor.FileEditorManager;
-import com.intellij.openapi.fileEditor.OpenFileDescriptor;
 import com.intellij.openapi.fileChooser.FileChooserFactory;
 import com.intellij.openapi.fileChooser.FileSaverDescriptor;
+import com.intellij.openapi.fileEditor.*;
+import com.intellij.openapi.progress.ProgressIndicator;
+import com.intellij.openapi.progress.ProgressManager;
+import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.project.DumbService;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectUtil;
@@ -44,21 +27,17 @@ import com.intellij.openapi.vfs.VirtualFileWrapper;
 import com.intellij.psi.PsiFile;
 import com.intellij.psi.PsiManager;
 import com.intellij.ui.ScrollPaneFactory;
-import com.intellij.util.concurrency.AppExecutorUtil;
 import org.jetbrains.annotations.NotNull;
 
-import javax.swing.JButton;
-import javax.swing.JComboBox;
-import javax.swing.JLabel;
-import javax.swing.JPanel;
-import java.awt.BorderLayout;
-import java.awt.CardLayout;
-import java.awt.FlowLayout;
+import javax.swing.*;
+import java.awt.*;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.function.Supplier;
 
 public final class AstLensPanel extends JPanel implements Disposable {
+    private static final Logger LOG = Logger.getInstance(AstLensPanel.class);
     private static final String STRUCTURE_CARD = "structure";
     private static final String CALL_GRAPH_CARD = "callGraph";
     private static final String CLASS_DEPENDENCIES_CARD = "classDependencies";
@@ -77,6 +56,8 @@ public final class AstLensPanel extends JPanel implements Disposable {
     private static final int CODE_HEALTH_VIEW = 6;
     private static final int PROJECT_STRUCTURE_VIEW = 7;
     private static final int PROJECT_CALL_GRAPH_VIEW = 8;
+    private static final String INCLUDE_DEPENDENCIES_PROPERTY = "ast.lens.include.project.dependencies";
+    private static final String FOCUS_CONNECTED_NODES_PROPERTY = "ast.lens.focus.connected.nodes";
 
     private final Project project;
     private final UastAnalyzer analyzer = new UastAnalyzer();
@@ -100,7 +81,8 @@ public final class AstLensPanel extends JPanel implements Disposable {
     private final JLabel status = new JLabel(AstLensBundle.message("status.open.file"));
     private final JButton exportButton = new JButton(AstLensBundle.message("button.export"));
     private final JComboBox<String> viewSelector;
-    private final JComboBox<String> relationshipSelector;
+    private final JCheckBox includeDependencies;
+    private final JCheckBox focusConnectedNodes;
     private int activeView = STRUCTURE_VIEW;
     private VirtualFile analyzedFile;
     private DependencyAnalysis currentDependencies;
@@ -114,6 +96,18 @@ public final class AstLensPanel extends JPanel implements Disposable {
         super(new BorderLayout());
         getAccessibleContext().setAccessibleName("AST Lens content");
         this.project = project;
+        includeDependencies = new JCheckBox(
+                AstLensBundle.message("analysis.scope.include.dependencies"),
+                PropertiesComponent.getInstance(project).getBoolean(INCLUDE_DEPENDENCIES_PROPERTY, true)
+        );
+        includeDependencies.setToolTipText(AstLensBundle.message("analysis.scope.include.dependencies.tooltip"));
+        includeDependencies.addActionListener(event -> analysisScopeChanged());
+        focusConnectedNodes = new JCheckBox(
+                AstLensBundle.message("graph.focus.connected.nodes"),
+                PropertiesComponent.getInstance(project).getBoolean(FOCUS_CONNECTED_NODES_PROPERTY, false)
+        );
+        focusConnectedNodes.setToolTipText(AstLensBundle.message("graph.focus.connected.nodes.tooltip"));
+        focusConnectedNodes.addActionListener(event -> focusConnectedNodesChanged());
         structureGraph = new AstGraphCanvas(this::navigateTo);
         callGraph = new CallGraphCanvas(this::navigateToCall);
         classDependencyGraph = new CallGraphCanvas(
@@ -139,6 +133,7 @@ public final class AstLensPanel extends JPanel implements Disposable {
                 "project.node.kind."
         );
         projectCallGraph = new CallGraphCanvas(this::navigateToCall);
+        applyConnectedNodesFocus();
 
         graphContainer.add(ScrollPaneFactory.createScrollPane(structureGraph, true), STRUCTURE_CARD);
         graphContainer.add(ScrollPaneFactory.createScrollPane(callGraph, true), CALL_GRAPH_CARD);
@@ -184,12 +179,26 @@ public final class AstLensPanel extends JPanel implements Disposable {
             graphLayout.show(graphContainer, cardFor(activeView));
             synchronizeWithCurrentCaret();
         });
-        RelationshipQuery[] relationshipQueries = RelationshipQuery.values();
-        relationshipSelector = new JComboBox<>(java.util.Arrays.stream(relationshipQueries)
+        RelationshipQuery[] methodQueries = java.util.Arrays.stream(RelationshipQuery.values())
+                .filter(RelationshipQuery::methodRequired)
+                .toArray(RelationshipQuery[]::new);
+        JComboBox<String> methodRelationshipSelector = new JComboBox<>(java.util.Arrays.stream(methodQueries)
                 .map(query -> AstLensBundle.message(query.messageKey()))
                 .toArray(String[]::new));
-        JButton searchRelationship = new JButton(AstLensBundle.message("button.search.relationship"));
-        searchRelationship.addActionListener(event -> searchRelationship());
+        JButton searchMethods = new JButton(AstLensBundle.message("button.search.methods"));
+        searchMethods.addActionListener(event -> searchRelationship(
+                methodQueries[methodRelationshipSelector.getSelectedIndex()]
+        ));
+        RelationshipQuery[] classQueries = java.util.Arrays.stream(RelationshipQuery.values())
+                .filter(query -> !query.methodRequired())
+                .toArray(RelationshipQuery[]::new);
+        JComboBox<String> classRelationshipSelector = new JComboBox<>(java.util.Arrays.stream(classQueries)
+                .map(query -> AstLensBundle.message(query.messageKey()))
+                .toArray(String[]::new));
+        JButton searchClasses = new JButton(AstLensBundle.message("button.search.classes"));
+        searchClasses.addActionListener(event -> searchRelationship(
+                classQueries[classRelationshipSelector.getSelectedIndex()]
+        ));
         JButton zoomOut = new JButton("−");
         zoomOut.setToolTipText(AstLensBundle.message("button.zoom.out"));
         zoomOut.addActionListener(event -> zoomOut());
@@ -200,7 +209,7 @@ public final class AstLensPanel extends JPanel implements Disposable {
         zoomIn.setToolTipText(AstLensBundle.message("button.zoom.in"));
         zoomIn.addActionListener(event -> zoomIn());
 
-        JPanel controls = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 4));
+        JPanel controls = new JPanel(new ResponsiveWrapLayout(6, 4));
         controls.add(analyze);
         controls.add(analyzeProject);
         controls.add(exportButton);
@@ -208,21 +217,72 @@ public final class AstLensPanel extends JPanel implements Disposable {
         controls.add(zoomOut);
         controls.add(resetZoom);
         controls.add(zoomIn);
-        controls.add(status);
+        controls.add(includeDependencies);
+        controls.add(focusConnectedNodes);
 
-        JPanel relationshipControls = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
-        relationshipControls.add(new JLabel(AstLensBundle.message("relationship.search.label")));
-        relationshipControls.add(relationshipSelector);
-        relationshipControls.add(searchRelationship);
+        JPanel methodSearchControls = new JPanel(new ResponsiveWrapLayout(6, 2));
+        methodSearchControls.add(new JLabel(AstLensBundle.message("relationship.method.search.label")));
+        methodSearchControls.add(methodRelationshipSelector);
+        methodSearchControls.add(searchMethods);
+
+        JPanel classSearchControls = new JPanel(new ResponsiveWrapLayout(6, 2));
+        classSearchControls.add(new JLabel(AstLensBundle.message("relationship.class.search.label")));
+        classSearchControls.add(classRelationshipSelector);
+        classSearchControls.add(searchClasses);
+
+        JPanel toolbar = new JPanel();
+        toolbar.setLayout(new BoxLayout(toolbar, BoxLayout.Y_AXIS));
+        controls.setAlignmentX(Component.LEFT_ALIGNMENT);
+        methodSearchControls.setAlignmentX(Component.LEFT_ALIGNMENT);
+        classSearchControls.setAlignmentX(Component.LEFT_ALIGNMENT);
+        toolbar.add(controls);
+        toolbar.add(methodSearchControls);
+        toolbar.add(classSearchControls);
 
         JPanel header = new JPanel(new BorderLayout());
-        header.add(controls, BorderLayout.NORTH);
-        header.add(relationshipControls, BorderLayout.SOUTH);
+        header.add(toolbar, BorderLayout.CENTER);
+        header.add(status, BorderLayout.SOUTH);
 
         add(header, BorderLayout.NORTH);
         add(graphContainer, BorderLayout.CENTER);
 
         installEditorListeners();
+    }
+
+    private static <T> T readPhase(
+            ProgressIndicator indicator,
+            double fraction,
+            String messageKey,
+            Supplier<T> operation
+    ) {
+        updateProgress(indicator, fraction, messageKey);
+        T result = ReadAction.computeBlocking(() -> {
+            ProgressManager.checkCanceled();
+            return operation.get();
+        });
+        ProgressManager.checkCanceled();
+        return result;
+    }
+
+    private static void updateProgress(ProgressIndicator indicator, double fraction, String messageKey) {
+        ProgressManager.checkCanceled();
+        indicator.setIndeterminate(false);
+        indicator.setFraction(fraction);
+        indicator.setText(AstLensBundle.message(messageKey));
+    }
+
+    private static String cardFor(int view) {
+        return switch (view) {
+            case CALL_GRAPH_VIEW -> CALL_GRAPH_CARD;
+            case CLASS_DEPENDENCIES_VIEW -> CLASS_DEPENDENCIES_CARD;
+            case PACKAGE_DEPENDENCIES_VIEW -> PACKAGE_DEPENDENCIES_CARD;
+            case PSI_UAST_VIEW -> PSI_UAST_CARD;
+            case RELATIONSHIP_VIEW -> RELATIONSHIP_CARD;
+            case CODE_HEALTH_VIEW -> CODE_HEALTH_CARD;
+            case PROJECT_STRUCTURE_VIEW -> PROJECT_STRUCTURE_CARD;
+            case PROJECT_CALL_GRAPH_VIEW -> PROJECT_CALL_GRAPH_CARD;
+            default -> STRUCTURE_CARD;
+        };
     }
 
     public void analyzeCurrentFile() {
@@ -243,31 +303,89 @@ public final class AstLensPanel extends JPanel implements Disposable {
             return;
         }
 
-        PsiFile psiFile = PsiManager.getInstance(project).findFile(file);
+        PsiFile psiFile = findPsiFile(file);
         if (psiFile == null) {
             showUnsupportedFile();
             return;
         }
+        AnalysisScope scope = analysisScope();
 
         status.setText(AstLensBundle.message("status.analyzing", file.getName()));
-        ReadAction.nonBlocking(() -> {
-                    AstAnalysisResult structure = analyzer.analyze(psiFile);
-                    if (structure == null) {
-                        return null;
-                    }
-                    DependencyAnalysis dependencies = dependencyGraphAnalyzer.analyze(project);
-                    return new PanelAnalysis(
-                            structure,
-                            callGraphAnalyzer.analyze(psiFile),
-                            dependencies,
-                            syntaxComparisonAnalyzer.analyze(psiFile),
-                            codeHealthAnalyzer.analyze(project, dependencies)
-                    );
-                })
-                .expireWith(project)
-                .coalesceBy(this, file)
-                .finishOnUiThread(ModalityState.defaultModalityState(), this::showResult)
-                .submit(AppExecutorUtil.getAppExecutorService());
+        new Task.Backgroundable(
+                project,
+                AstLensBundle.message("progress.file.title", file.getName()),
+                true
+        ) {
+            private PanelAnalysis result;
+
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                AstAnalysisResult structure = readPhase(
+                        indicator,
+                        0.05,
+                        "progress.phase.structure",
+                        () -> analyzer.analyze(psiFile)
+                );
+                if (structure == null) {
+                    return;
+                }
+                CallGraph calls = readPhase(
+                        indicator,
+                        0.20,
+                        "progress.phase.calls",
+                        () -> callGraphAnalyzer.analyze(psiFile, scope)
+                );
+                DependencyAnalysis dependencies = readPhase(
+                        indicator,
+                        0.38,
+                        "progress.phase.dependencies",
+                        () -> dependencyGraphAnalyzer.analyze(project, scope)
+                );
+                SyntaxComparison comparison = readPhase(
+                        indicator,
+                        0.58,
+                        "progress.phase.comparison",
+                        () -> syntaxComparisonAnalyzer.analyze(psiFile)
+                );
+                CodeHealthReport health = readPhase(
+                        indicator,
+                        0.72,
+                        "progress.phase.health",
+                        () -> codeHealthAnalyzer.analyze(project, dependencies, scope)
+                );
+
+                updateProgress(indicator, 0.84, "progress.phase.layout");
+                result = new PanelAnalysis(
+                        structure,
+                        calls,
+                        dependencies,
+                        comparison,
+                        health,
+                        AstGraphLayout.calculate(structure.root()),
+                        CallGraphLayout.calculate(calls),
+                        CallGraphLayout.calculate(dependencies.classGraph()),
+                        CallGraphLayout.calculate(dependencies.packageGraph())
+                );
+                updateProgress(indicator, 1.0, "progress.phase.ready");
+            }
+
+            @Override
+            public void onSuccess() {
+                if (scope == analysisScope()) {
+                    showResult(result);
+                }
+            }
+
+            @Override
+            public void onCancel() {
+                showCancelled();
+            }
+
+            @Override
+            public void onThrowable(@NotNull Throwable error) {
+                showOperationError("file", file.getName(), error);
+            }
+        }.queue();
     }
 
     private void analyzeProject() {
@@ -277,29 +395,75 @@ public final class AstLensPanel extends JPanel implements Disposable {
             return;
         }
 
+        AnalysisScope scope = analysisScope();
         status.setText(AstLensBundle.message("status.analyzing.project"));
-        ReadAction.nonBlocking(() -> {
-                    ProjectAnalysis projectAnalysis = projectAnalyzer.analyze(project);
-                    DependencyAnalysis dependencies = dependencyGraphAnalyzer.analyze(project);
-                    return new ProjectPanelAnalysis(
-                            projectAnalysis,
-                            dependencies,
-                            codeHealthAnalyzer.analyze(project, dependencies)
-                    );
-                })
-                .expireWith(project)
-                .coalesceBy(this, "project-analysis")
-                .finishOnUiThread(ModalityState.defaultModalityState(), this::showProjectResult)
-                .submit(AppExecutorUtil.getAppExecutorService());
+        new Task.Backgroundable(
+                project,
+                AstLensBundle.message("progress.project.title"),
+                true
+        ) {
+            private ProjectPanelAnalysis result;
+
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                ProjectAnalysis projectAnalysis = readPhase(
+                        indicator,
+                        0.05,
+                        "progress.phase.project",
+                        () -> projectAnalyzer.analyze(project, scope)
+                );
+                DependencyAnalysis dependencies = readPhase(
+                        indicator,
+                        0.48,
+                        "progress.phase.dependencies",
+                        () -> dependencyGraphAnalyzer.analyze(project, scope)
+                );
+                CodeHealthReport health = readPhase(
+                        indicator,
+                        0.68,
+                        "progress.phase.health",
+                        () -> codeHealthAnalyzer.analyze(project, dependencies, scope)
+                );
+
+                updateProgress(indicator, 0.80, "progress.phase.layout");
+                result = new ProjectPanelAnalysis(
+                        projectAnalysis,
+                        dependencies,
+                        health,
+                        CallGraphLayout.calculate(projectAnalysis.structureGraph()),
+                        CallGraphLayout.calculate(projectAnalysis.callGraph()),
+                        CallGraphLayout.calculate(dependencies.classGraph()),
+                        CallGraphLayout.calculate(dependencies.packageGraph())
+                );
+                updateProgress(indicator, 1.0, "progress.phase.ready");
+            }
+
+            @Override
+            public void onSuccess() {
+                if (scope == analysisScope()) {
+                    showProjectResult(result);
+                }
+            }
+
+            @Override
+            public void onCancel() {
+                showCancelled();
+            }
+
+            @Override
+            public void onThrowable(@NotNull Throwable error) {
+                showOperationError("project", project.getName(), error);
+            }
+        }.queue();
     }
 
     private void showProjectResult(ProjectPanelAnalysis result) {
         currentProjectAnalysis = result.projectAnalysis();
-        projectStructureGraph.setGraph(currentProjectAnalysis.structureGraph());
-        projectCallGraph.setGraph(currentProjectAnalysis.callGraph());
+        projectStructureGraph.setLayout(result.projectStructureLayout());
+        projectCallGraph.setLayout(result.projectCallLayout());
         currentDependencies = result.dependencies();
-        classDependencyGraph.setGraph(currentDependencies.classGraph());
-        packageDependencyGraph.setGraph(currentDependencies.packageGraph());
+        classDependencyGraph.setLayout(result.classDependencyLayout());
+        packageDependencyGraph.setLayout(result.packageDependencyLayout());
         currentCodeHealth = result.codeHealth();
         codeHealthPanel.setReport(currentCodeHealth);
         exportButton.setEnabled(true);
@@ -324,49 +488,6 @@ public final class AstLensPanel extends JPanel implements Disposable {
         ));
     }
 
-    private void showResult(PanelAnalysis result) {
-        if (result == null) {
-            showUnsupportedFile();
-            return;
-        }
-        VirtualFile[] selected = FileEditorManager.getInstance(project).getSelectedFiles();
-        if (selected.length == 0 || !result.structure().file().equals(selected[0])) {
-            return;
-        }
-        analyzedFile = result.structure().file();
-        currentAnalysis = result;
-        structureGraph.setGraph(result.structure().root());
-        callGraph.setGraph(result.callGraph());
-        currentDependencies = result.dependencies();
-        classDependencyGraph.setGraph(currentDependencies.classGraph());
-        packageDependencyGraph.setGraph(currentDependencies.packageGraph());
-        syntaxComparisonPanel.setComparison(result.syntaxComparison());
-        currentCodeHealth = result.codeHealth();
-        codeHealthPanel.setReport(currentCodeHealth);
-        clearRelationshipResult();
-        exportButton.setEnabled(true);
-        synchronizeWithCurrentCaret();
-        status.setText(AstLensBundle.message("status.result", analyzedFile.getName()));
-    }
-
-    private void showUnsupportedFile() {
-        analyzedFile = null;
-        currentAnalysis = null;
-        structureGraph.setGraph(null);
-        callGraph.setGraph(null);
-        syntaxComparisonPanel.setComparison(null);
-        clearRelationshipResult();
-        if (currentProjectAnalysis == null) {
-            classDependencyGraph.setGraph(null);
-            packageDependencyGraph.setGraph(null);
-            codeHealthPanel.setReport(null);
-            currentDependencies = null;
-            currentCodeHealth = null;
-        }
-        exportButton.setEnabled(currentProjectAnalysis != null);
-        status.setText(AstLensBundle.message("status.unsupported"));
-    }
-
     private void exportCurrentView() {
         if (!hasDataForActiveView()) {
             Messages.showInfoMessage(
@@ -379,7 +500,9 @@ public final class AstLensPanel extends JPanel implements Disposable {
 
         GraphExporter.Format[] formats = GraphExporter.Format.values();
         String[] options = java.util.Arrays.stream(formats)
-                .map(GraphExporter.Format::displayName)
+                .map(format -> format == GraphExporter.Format.MERMAID_HTML
+                        ? AstLensBundle.message("export.format.mermaid.html")
+                        : format.displayName())
                 .toArray(String[]::new);
         int selected = Messages.showDialog(
                 project,
@@ -502,10 +625,53 @@ public final class AstLensPanel extends JPanel implements Disposable {
         };
     }
 
-    private void searchRelationship() {
+    private void showResult(PanelAnalysis result) {
+        if (result == null) {
+            showUnsupportedFile();
+            return;
+        }
+        VirtualFile[] selected = FileEditorManager.getInstance(project).getSelectedFiles();
+        if (selected.length == 0 || !result.structure().file().equals(selected[0])) {
+            return;
+        }
+        analyzedFile = result.structure().file();
+        currentAnalysis = result;
+        structureGraph.setLayout(result.structureLayout());
+        callGraph.setLayout(result.callLayout());
+        currentDependencies = result.dependencies();
+        classDependencyGraph.setLayout(result.classDependencyLayout());
+        packageDependencyGraph.setLayout(result.packageDependencyLayout());
+        syntaxComparisonPanel.setComparison(result.syntaxComparison());
+        currentCodeHealth = result.codeHealth();
+        codeHealthPanel.setReport(currentCodeHealth);
+        clearRelationshipResult();
+        exportButton.setEnabled(true);
+        synchronizeWithCurrentCaret();
+        status.setText(AstLensBundle.message("status.result", analyzedFile.getName()));
+    }
+
+    private void showUnsupportedFile() {
+        analyzedFile = null;
+        currentAnalysis = null;
+        structureGraph.setLayout(AstGraphLayout.empty());
+        callGraph.setLayout(CallGraphLayout.empty());
+        syntaxComparisonPanel.setComparison(null);
+        clearRelationshipResult();
+        if (currentProjectAnalysis == null) {
+            classDependencyGraph.setLayout(CallGraphLayout.empty());
+            packageDependencyGraph.setLayout(CallGraphLayout.empty());
+            codeHealthPanel.setReport(null);
+            currentDependencies = null;
+            currentCodeHealth = null;
+        }
+        exportButton.setEnabled(currentProjectAnalysis != null);
+        status.setText(AstLensBundle.message("status.unsupported"));
+    }
+
+    private void searchRelationship(RelationshipQuery query) {
         if (DumbService.isDumb(project)) {
             status.setText(AstLensBundle.message("status.indexing"));
-            DumbService.getInstance(project).runWhenSmart(this::searchRelationship);
+            DumbService.getInstance(project).runWhenSmart(() -> searchRelationship(query));
             return;
         }
 
@@ -522,70 +688,129 @@ public final class AstLensPanel extends JPanel implements Disposable {
             return;
         }
 
-        PsiFile psiFile = PsiManager.getInstance(project).findFile(file);
+        PsiFile psiFile = findPsiFile(file);
         if (psiFile == null) {
             showUnsupportedFile();
             return;
         }
-        RelationshipQuery query = RelationshipQuery.values()[relationshipSelector.getSelectedIndex()];
         RelationshipRequest request = new RelationshipRequest(
                 file,
                 editor.getCaretModel().getOffset(),
                 query
         );
         DependencyAnalysis dependencies = currentAnalysis.dependencies();
+        AnalysisScope scope = analysisScope();
         status.setText(AstLensBundle.message("relationship.searching"));
-        ReadAction.nonBlocking(() -> new RelationshipResponse(
-                        request,
-                        relationshipAnalyzer.analyze(
+        new Task.Backgroundable(
+                project,
+                AstLensBundle.message("progress.relationship.title"),
+                true
+        ) {
+            private RelationshipResponse response;
+
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                RelationshipResult result = readPhase(
+                        indicator,
+                        0.10,
+                        "progress.phase.relationship",
+                        () -> relationshipAnalyzer.analyze(
                                 project,
                                 psiFile,
                                 request.offset(),
                                 request.query(),
-                                dependencies
+                                dependencies,
+                                scope
                         )
-                ))
-                .expireWith(project)
-                .coalesceBy(this, "relationship-search")
-                .finishOnUiThread(ModalityState.defaultModalityState(), this::showRelationshipResult)
-                .submit(AppExecutorUtil.getAppExecutorService());
+                );
+                updateProgress(indicator, 0.80, "progress.phase.layout");
+                response = new RelationshipResponse(
+                        request,
+                        result,
+                        result == null
+                                ? CallGraphLayout.empty()
+                                : CallGraphLayout.calculate(result.graph())
+                );
+                updateProgress(indicator, 1.0, "progress.phase.ready");
+            }
+
+            @Override
+            public void onSuccess() {
+                if (scope == analysisScope()) {
+                    showRelationshipResult(response);
+                }
+            }
+
+            @Override
+            public void onCancel() {
+                showCancelled();
+            }
+
+            @Override
+            public void onThrowable(@NotNull Throwable error) {
+                showOperationError(
+                        "relationship",
+                        AstLensBundle.message(request.query().messageKey()),
+                        error
+                );
+            }
+        }.queue();
     }
 
-    private void showRelationshipResult(RelationshipResponse response) {
-        VirtualFile[] selected = FileEditorManager.getInstance(project).getSelectedFiles();
-        if (selected.length == 0 || !response.request().file().equals(selected[0])) {
-            return;
-        }
-        RelationshipResult result = response.result();
-        if (result == null) {
-            String key = response.request().query().methodRequired()
-                    ? "relationship.target.method.required"
-                    : "relationship.target.class.required";
-            Messages.showInfoMessage(
-                    project,
-                    AstLensBundle.message(key),
-                    AstLensBundle.message("dialog.title")
-            );
-            status.setText(AstLensBundle.message("relationship.no.target"));
-            return;
-        }
-
-        currentRelationship = result;
-        currentRelationshipQuery = response.request().query();
-        relationshipGraph.setGraph(result.graph());
-        relationshipGraph.selectNodeById(result.targetId());
-        viewSelector.setSelectedIndex(RELATIONSHIP_VIEW);
-        status.setText(AstLensBundle.message(
-                "relationship.result",
-                result.relationCount(),
-                result.targetLabel()
-        ));
+    private PsiFile findPsiFile(VirtualFile file) {
+        return ReadAction.computeBlocking(() -> file.isValid()
+                ? PsiManager.getInstance(project).findFile(file)
+                : null);
     }
 
-    private void clearRelationshipResult() {
+    private AnalysisScope analysisScope() {
+        return includeDependencies.isSelected()
+                ? AnalysisScope.PROJECT_AND_DEPENDENCIES
+                : AnalysisScope.PROJECT_ONLY;
+    }
+
+    private void analysisScopeChanged() {
+        PropertiesComponent.getInstance(project).setValue(
+                INCLUDE_DEPENDENCIES_PROPERTY,
+                Boolean.toString(includeDependencies.isSelected())
+        );
+        analyzedFile = null;
+        currentAnalysis = null;
+        currentDependencies = null;
         currentRelationship = null;
         currentRelationshipQuery = null;
-        relationshipGraph.setGraph(null);
+        currentCodeHealth = null;
+        currentProjectAnalysis = null;
+        structureGraph.setLayout(AstGraphLayout.empty());
+        callGraph.setLayout(CallGraphLayout.empty());
+        classDependencyGraph.setLayout(CallGraphLayout.empty());
+        packageDependencyGraph.setLayout(CallGraphLayout.empty());
+        relationshipGraph.setLayout(CallGraphLayout.empty());
+        syntaxComparisonPanel.setComparison(null);
+        codeHealthPanel.setReport(null);
+        projectStructureGraph.setLayout(CallGraphLayout.empty());
+        projectCallGraph.setLayout(CallGraphLayout.empty());
+        exportButton.setEnabled(false);
+        status.setText(AstLensBundle.message("status.analysis.scope.changed"));
+    }
+
+    private void focusConnectedNodesChanged() {
+        PropertiesComponent.getInstance(project).setValue(
+                FOCUS_CONNECTED_NODES_PROPERTY,
+                Boolean.toString(focusConnectedNodes.isSelected())
+        );
+        applyConnectedNodesFocus();
+    }
+
+    private void applyConnectedNodesFocus() {
+        boolean enabled = focusConnectedNodes.isSelected();
+        structureGraph.setFocusConnectedNodes(enabled);
+        callGraph.setFocusConnectedNodes(enabled);
+        classDependencyGraph.setFocusConnectedNodes(enabled);
+        packageDependencyGraph.setFocusConnectedNodes(enabled);
+        relationshipGraph.setFocusConnectedNodes(enabled);
+        projectStructureGraph.setFocusConnectedNodes(enabled);
+        projectCallGraph.setFocusConnectedNodes(enabled);
     }
 
     private void navigateTo(AstNode node) {
@@ -620,7 +845,8 @@ public final class AstLensPanel extends JPanel implements Disposable {
             case RELATIONSHIP_VIEW -> relationshipGraph.zoomIn();
             case PROJECT_STRUCTURE_VIEW -> projectStructureGraph.zoomIn();
             case PROJECT_CALL_GRAPH_VIEW -> projectCallGraph.zoomIn();
-            case PSI_UAST_VIEW, CODE_HEALTH_VIEW -> { }
+            case PSI_UAST_VIEW, CODE_HEALTH_VIEW -> {
+            }
             default -> structureGraph.zoomIn();
         }
     }
@@ -633,7 +859,8 @@ public final class AstLensPanel extends JPanel implements Disposable {
             case RELATIONSHIP_VIEW -> relationshipGraph.zoomOut();
             case PROJECT_STRUCTURE_VIEW -> projectStructureGraph.zoomOut();
             case PROJECT_CALL_GRAPH_VIEW -> projectCallGraph.zoomOut();
-            case PSI_UAST_VIEW, CODE_HEALTH_VIEW -> { }
+            case PSI_UAST_VIEW, CODE_HEALTH_VIEW -> {
+            }
             default -> structureGraph.zoomOut();
         }
     }
@@ -646,63 +873,41 @@ public final class AstLensPanel extends JPanel implements Disposable {
             case RELATIONSHIP_VIEW -> relationshipGraph.resetZoom();
             case PROJECT_STRUCTURE_VIEW -> projectStructureGraph.resetZoom();
             case PROJECT_CALL_GRAPH_VIEW -> projectCallGraph.resetZoom();
-            case PSI_UAST_VIEW, CODE_HEALTH_VIEW -> { }
+            case PSI_UAST_VIEW, CODE_HEALTH_VIEW -> {
+            }
             default -> structureGraph.resetZoom();
         }
     }
 
-    private static String cardFor(int view) {
-        return switch (view) {
-            case CALL_GRAPH_VIEW -> CALL_GRAPH_CARD;
-            case CLASS_DEPENDENCIES_VIEW -> CLASS_DEPENDENCIES_CARD;
-            case PACKAGE_DEPENDENCIES_VIEW -> PACKAGE_DEPENDENCIES_CARD;
-            case PSI_UAST_VIEW -> PSI_UAST_CARD;
-            case RELATIONSHIP_VIEW -> RELATIONSHIP_CARD;
-            case CODE_HEALTH_VIEW -> CODE_HEALTH_CARD;
-            case PROJECT_STRUCTURE_VIEW -> PROJECT_STRUCTURE_CARD;
-            case PROJECT_CALL_GRAPH_VIEW -> PROJECT_CALL_GRAPH_CARD;
-            default -> STRUCTURE_CARD;
-        };
-    }
+    private void showRelationshipResult(RelationshipResponse response) {
+        VirtualFile[] selected = FileEditorManager.getInstance(project).getSelectedFiles();
+        if (selected.length == 0 || !response.request().file().equals(selected[0])) {
+            return;
+        }
+        RelationshipResult result = response.result();
+        if (result == null) {
+            String key = response.request().query().methodRequired()
+                    ? "relationship.target.method.required"
+                    : "relationship.target.class.required";
+            Messages.showInfoMessage(
+                    project,
+                    AstLensBundle.message(key),
+                    AstLensBundle.message("dialog.title")
+            );
+            status.setText(AstLensBundle.message("relationship.no.target"));
+            return;
+        }
 
-    private void installEditorListeners() {
-        EditorFactory.getInstance().getEventMulticaster().addCaretListener(new CaretListener() {
-            @Override
-            public void caretPositionChanged(@NotNull CaretEvent event) {
-                synchronizeWithCaret(event.getEditor());
-            }
-        }, this);
-
-        project.getMessageBus().connect(this).subscribe(
-                FileEditorManagerListener.FILE_EDITOR_MANAGER,
-                new FileEditorManagerListener() {
-                    @Override
-                    public void selectionChanged(@NotNull FileEditorManagerEvent event) {
-                        VirtualFile file = event.getNewFile();
-                        if (file == null) {
-                            analyzedFile = null;
-                            currentAnalysis = null;
-                            structureGraph.setGraph(null);
-                            callGraph.setGraph(null);
-                            syntaxComparisonPanel.setComparison(null);
-                            clearRelationshipResult();
-                            if (currentProjectAnalysis == null) {
-                                classDependencyGraph.setGraph(null);
-                                packageDependencyGraph.setGraph(null);
-                                codeHealthPanel.setReport(null);
-                                currentDependencies = null;
-                                currentCodeHealth = null;
-                            }
-                            exportButton.setEnabled(currentProjectAnalysis != null);
-                            status.setText(AstLensBundle.message("status.open.file"));
-                        } else if (!file.equals(analyzedFile)) {
-                            analyzeCurrentFile();
-                        } else {
-                            synchronizeWithCurrentCaret();
-                        }
-                    }
-                }
-        );
+        currentRelationship = result;
+        currentRelationshipQuery = response.request().query();
+        relationshipGraph.setLayout(response.layout());
+        relationshipGraph.selectNodeById(result.targetId());
+        viewSelector.setSelectedIndex(RELATIONSHIP_VIEW);
+        status.setText(AstLensBundle.message(
+                "relationship.result",
+                result.relationCount(),
+                result.targetLabel()
+        ));
     }
 
     private void synchronizeWithCurrentCaret() {
@@ -732,6 +937,75 @@ public final class AstLensPanel extends JPanel implements Disposable {
         }
     }
 
+    private void clearRelationshipResult() {
+        currentRelationship = null;
+        currentRelationshipQuery = null;
+        relationshipGraph.setLayout(CallGraphLayout.empty());
+    }
+
+    private void installEditorListeners() {
+        EditorFactory.getInstance().getEventMulticaster().addCaretListener(new CaretListener() {
+            @Override
+            public void caretPositionChanged(@NotNull CaretEvent event) {
+                synchronizeWithCaret(event.getEditor());
+            }
+        }, this);
+
+        project.getMessageBus().connect(this).subscribe(
+                FileEditorManagerListener.FILE_EDITOR_MANAGER,
+                new FileEditorManagerListener() {
+                    @Override
+                    public void selectionChanged(@NotNull FileEditorManagerEvent event) {
+                        VirtualFile file = event.getNewFile();
+                        if (file == null) {
+                            analyzedFile = null;
+                            currentAnalysis = null;
+                            structureGraph.setLayout(AstGraphLayout.empty());
+                            callGraph.setLayout(CallGraphLayout.empty());
+                            syntaxComparisonPanel.setComparison(null);
+                            clearRelationshipResult();
+                            if (currentProjectAnalysis == null) {
+                                classDependencyGraph.setLayout(CallGraphLayout.empty());
+                                packageDependencyGraph.setLayout(CallGraphLayout.empty());
+                                codeHealthPanel.setReport(null);
+                                currentDependencies = null;
+                                currentCodeHealth = null;
+                            }
+                            exportButton.setEnabled(currentProjectAnalysis != null);
+                            status.setText(AstLensBundle.message("status.open.file"));
+                        } else if (!file.equals(analyzedFile)) {
+                            analyzeCurrentFile();
+                        } else {
+                            synchronizeWithCurrentCaret();
+                        }
+                    }
+                }
+        );
+    }
+
+    private void showCancelled() {
+        status.setText(AstLensBundle.message("status.cancelled"));
+    }
+
+    private void showOperationError(String operation, String subject, Throwable error) {
+        LOG.warn("AST Lens " + operation + " operation failed for " + subject, error);
+        String detail = error.getMessage();
+        if (detail == null || detail.isBlank()) {
+            detail = error.getClass().getSimpleName();
+        }
+        String messageKey = switch (operation) {
+            case "project" -> "error.analysis.project";
+            case "relationship" -> "error.analysis.relationship";
+            default -> "error.analysis.file";
+        };
+        status.setText(AstLensBundle.message("status.failed", subject));
+        Messages.showErrorDialog(
+                project,
+                AstLensBundle.message(messageKey, subject, detail),
+                AstLensBundle.message("dialog.title")
+        );
+    }
+
     @Override
     public void dispose() {
         // Les connexions et listeners sont automatiquement retirés par le Disposable parent.
@@ -742,14 +1016,22 @@ public final class AstLensPanel extends JPanel implements Disposable {
             CallGraph callGraph,
             DependencyAnalysis dependencies,
             SyntaxComparison syntaxComparison,
-            CodeHealthReport codeHealth
+            CodeHealthReport codeHealth,
+            AstGraphLayout structureLayout,
+            CallGraphLayout callLayout,
+            CallGraphLayout classDependencyLayout,
+            CallGraphLayout packageDependencyLayout
     ) {
     }
 
     private record ProjectPanelAnalysis(
             ProjectAnalysis projectAnalysis,
             DependencyAnalysis dependencies,
-            CodeHealthReport codeHealth
+            CodeHealthReport codeHealth,
+            CallGraphLayout projectStructureLayout,
+            CallGraphLayout projectCallLayout,
+            CallGraphLayout classDependencyLayout,
+            CallGraphLayout packageDependencyLayout
     ) {
     }
 
@@ -759,6 +1041,10 @@ public final class AstLensPanel extends JPanel implements Disposable {
     private record RelationshipRequest(VirtualFile file, int offset, RelationshipQuery query) {
     }
 
-    private record RelationshipResponse(RelationshipRequest request, RelationshipResult result) {
+    private record RelationshipResponse(
+            RelationshipRequest request,
+            RelationshipResult result,
+            CallGraphLayout layout
+    ) {
     }
 }

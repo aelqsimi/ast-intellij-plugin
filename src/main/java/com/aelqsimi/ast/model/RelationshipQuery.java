@@ -4,6 +4,7 @@ public enum RelationshipQuery {
     CALLERS(true, "relationship.query.callers"),
     CALLEES(true, "relationship.query.callees"),
     DEPENDENT_CLASSES(false, "relationship.query.dependent.classes"),
+    PARENT_CLASSES(false, "relationship.query.parent.classes"),
     IMPLEMENTED_INTERFACES(false, "relationship.query.implemented.interfaces"),
     INHERITING_CLASSES(false, "relationship.query.inheriting.classes");
 

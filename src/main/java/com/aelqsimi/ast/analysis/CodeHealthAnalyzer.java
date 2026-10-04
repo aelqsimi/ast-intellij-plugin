@@ -1,42 +1,16 @@
 package com.aelqsimi.ast.analysis;
 
-import com.aelqsimi.ast.model.CallGraph;
-import com.aelqsimi.ast.model.CallGraphEdge;
-import com.aelqsimi.ast.model.CallGraphNode;
-import com.aelqsimi.ast.model.CodeHealthIssue;
-import com.aelqsimi.ast.model.CodeHealthReport;
-import com.aelqsimi.ast.model.DependencyAnalysis;
+import com.aelqsimi.ast.model.*;
 import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.project.Project;
 import org.jetbrains.annotations.NotNull;
 
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 
 public final class CodeHealthAnalyzer {
     public static final int DEFAULT_CLASS_LINE_THRESHOLD = IncrementalProjectCache.CLASS_LINE_THRESHOLD;
     public static final int DEFAULT_METHOD_COMPLEXITY_THRESHOLD =
             IncrementalProjectCache.METHOD_COMPLEXITY_THRESHOLD;
-
-    public CodeHealthReport analyze(@NotNull Project project, @NotNull DependencyAnalysis dependencies) {
-        List<CodeHealthIssue> issues = new ArrayList<>(
-                IncrementalProjectCache.getInstance(project).snapshot().localHealthIssues()
-        );
-        addCycles(dependencies.classGraph(), CodeHealthIssue.Kind.CLASS_DEPENDENCY_CYCLE, issues);
-        addCycles(dependencies.packageGraph(), CodeHealthIssue.Kind.PACKAGE_DEPENDENCY_CYCLE, issues);
-        issues.sort(Comparator.comparing(CodeHealthIssue::kind).thenComparing(CodeHealthIssue::symbol));
-        return new CodeHealthReport(
-                DEFAULT_CLASS_LINE_THRESHOLD,
-                DEFAULT_METHOD_COMPLEXITY_THRESHOLD,
-                issues
-        );
-    }
 
     private static void addCycles(
             CallGraph graph,
@@ -88,6 +62,28 @@ public final class CodeHealthAnalyzer {
             }
         });
         return state.components;
+    }
+
+    public CodeHealthReport analyze(@NotNull Project project, @NotNull DependencyAnalysis dependencies) {
+        return analyze(project, dependencies, AnalysisScope.PROJECT_AND_DEPENDENCIES);
+    }
+
+    public CodeHealthReport analyze(
+            @NotNull Project project,
+            @NotNull DependencyAnalysis dependencies,
+            @NotNull AnalysisScope scope
+    ) {
+        List<CodeHealthIssue> issues = new ArrayList<>(
+                IncrementalProjectCache.getInstance(project).snapshot(scope).localHealthIssues()
+        );
+        addCycles(dependencies.classGraph(), CodeHealthIssue.Kind.CLASS_DEPENDENCY_CYCLE, issues);
+        addCycles(dependencies.packageGraph(), CodeHealthIssue.Kind.PACKAGE_DEPENDENCY_CYCLE, issues);
+        issues.sort(Comparator.comparing(CodeHealthIssue::kind).thenComparing(CodeHealthIssue::symbol));
+        return new CodeHealthReport(
+                DEFAULT_CLASS_LINE_THRESHOLD,
+                DEFAULT_METHOD_COMPLEXITY_THRESHOLD,
+                issues
+        );
     }
 
     private static final class TarjanState {
