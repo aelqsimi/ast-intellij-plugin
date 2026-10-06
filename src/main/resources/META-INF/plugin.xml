@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>com.aelqsimi.ast</id>
     <name>AST Lens</name>
-    <vendor email="a.elqsimi.pro@gmail.com">Abdelmounaim EL QSIMI</vendor>
+    <vendor email="aelqsimi.pro@gmail.com">Abdelmounaim EL QSIMI</vendor>
 
     <description><![CDATA[
         Explore Java and Kotlin code through interactive UAST visualizations.
