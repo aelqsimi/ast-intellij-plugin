@@ -17,6 +17,8 @@ and understanding unfamiliar codebases.
 
 ![ATS Lens Image](https://github.com/aelqsimi/ast-intellij-plugin/blob/develop/ASTLens%20.png?raw=true)
 
+[![Release](https://github.com/aelqsimi/ast-intellij-plugin/actions/workflows/release.yml/badge.svg)](https://github.com/aelqsimi/ast-intellij-plugin/actions/workflows/release.yml)
+
 ## Try the plugin
 
 Marketplace : https://plugins.jetbrains.com/plugin/34773-ast-lens/ast-lens
