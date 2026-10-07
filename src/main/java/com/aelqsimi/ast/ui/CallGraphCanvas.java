@@ -18,6 +18,8 @@ import java.util.function.Consumer;
 public final class CallGraphCanvas extends JComponent {
     private static final int NODE_WIDTH = CallGraphLayout.NODE_WIDTH;
     private static final int NODE_HEIGHT = CallGraphLayout.NODE_HEIGHT;
+    private static final int DRAG_THRESHOLD = 3;
+    private static final int DRAG_MARGIN = 12;
 
     private final Consumer<CallGraphNode> navigator;
     private final String tooltipKey;
@@ -31,6 +33,12 @@ public final class CallGraphCanvas extends JComponent {
     private Rectangle focusBounds = new Rectangle();
     private long focusRequestId;
     private CallGraphNode selectedNode;
+    private CallGraphNode draggedNode;
+    private Point dragOffset = new Point();
+    private Point dragOrigin;
+    private boolean dragOccurred;
+    private NodeControl pressedControl;
+    private NodeControl hoveredControl;
 
     public CallGraphCanvas(Consumer<CallGraphNode> navigator) {
         this(navigator, "call.graph.tooltip", "call.node.kind.");
@@ -43,16 +51,87 @@ public final class CallGraphCanvas extends JComponent {
         setOpaque(true);
         setBackground(JBColor.namedColor("Editor.background", new JBColor(0xFFFFFF, 0x1E1F22)));
         setToolTipText("");
-        addMouseListener(new MouseAdapter() {
+        MouseAdapter mouseHandler = new MouseAdapter() {
+            @Override
+            public void mousePressed(MouseEvent event) {
+                dragOccurred = false;
+                pressedControl = null;
+                if (!SwingUtilities.isLeftMouseButton(event)) {
+                    return;
+                }
+                NodeControl control = findNodeControl(event.getPoint());
+                if (control != null) {
+                    pressedControl = control;
+                    draggedNode = null;
+                    dragOrigin = null;
+                    return;
+                }
+                CallGraphLayout.Node visual = findVisualNode(event.getPoint());
+                if (visual == null) {
+                    return;
+                }
+                focusRequestId++;
+                draggedNode = visual.node();
+                Point logicalPoint = inverseTransform(event.getPoint());
+                dragOffset = new Point(logicalPoint.x - visual.x(), logicalPoint.y - visual.y());
+                dragOrigin = event.getPoint();
+            }
+
+            @Override
+            public void mouseDragged(MouseEvent event) {
+                moveDraggedNode(event);
+            }
+
+            @Override
+            public void mouseReleased(MouseEvent event) {
+                if (draggedNode == null) {
+                    return;
+                }
+                draggedNode = null;
+                dragOrigin = null;
+                updateCursor(event.getPoint());
+            }
+
             @Override
             public void mouseClicked(MouseEvent event) {
+                if (pressedControl != null) {
+                    NodeControl releasedControl = findNodeControl(event.getPoint());
+                    NodeControl control = pressedControl;
+                    pressedControl = null;
+                    if (sameControl(control, releasedControl)) {
+                        activateControl(control);
+                    }
+                    event.consume();
+                    return;
+                }
+                if (dragOccurred) {
+                    dragOccurred = false;
+                    event.consume();
+                    return;
+                }
                 CallGraphNode clicked = findNode(event.getPoint());
                 selectNode(clicked, false);
-                if (clicked != null && event.getClickCount() == 2) {
-                    navigator.accept(clicked);
+            }
+
+            @Override
+            public void mouseMoved(MouseEvent event) {
+                updateHoveredControl(event.getPoint());
+                updateCursor(event.getPoint());
+            }
+
+            @Override
+            public void mouseExited(MouseEvent event) {
+                if (draggedNode == null) {
+                    setCursor(Cursor.getDefaultCursor());
+                }
+                if (hoveredControl != null) {
+                    hoveredControl = null;
+                    repaint();
                 }
             }
-        });
+        };
+        addMouseListener(mouseHandler);
+        addMouseMotionListener(mouseHandler);
     }
 
     private static PointD boundaryPoint(PointD from, PointD toward) {
@@ -96,16 +175,11 @@ public final class CallGraphCanvas extends JComponent {
                 : edge.label();
     }
 
-    void setLayout(CallGraphLayout layout) {
-        baseGraphLayout = layout == null ? CallGraphLayout.empty() : layout;
-        graphLayout = baseGraphLayout;
-        focusRequestId++;
-        focusedNodeIds = Set.of();
-        focusBounds = new Rectangle();
-        focusZoom = zoom;
-        selectedNode = null;
-        updateCanvasSize();
-        repaint();
+    private static boolean sameControl(NodeControl first, NodeControl second) {
+        return first != null
+                && second != null
+                && first.node().id().equals(second.node().id())
+                && first.action() == second.action();
     }
 
     public void selectNodeAtOffset(VirtualFile file, int offset) {
@@ -263,6 +337,37 @@ public final class CallGraphCanvas extends JComponent {
         g.drawString(label, (int) x - metrics.stringWidth(label) / 2, (int) y + 4);
     }
 
+    void setLayout(CallGraphLayout layout) {
+        baseGraphLayout = layout == null ? CallGraphLayout.empty() : layout;
+        graphLayout = baseGraphLayout;
+        focusRequestId++;
+        focusedNodeIds = Set.of();
+        focusBounds = new Rectangle();
+        focusZoom = zoom;
+        selectedNode = null;
+        draggedNode = null;
+        dragOrigin = null;
+        dragOccurred = false;
+        pressedControl = null;
+        hoveredControl = null;
+        setCursor(Cursor.getDefaultCursor());
+        updateCanvasSize();
+        repaint();
+    }
+
+    private void drawCenteredEllipsized(Graphics2D g, String text, int x, int y, int width) {
+        FontMetrics metrics = g.getFontMetrics();
+        String displayed = text;
+        while (displayed.length() > 3 && metrics.stringWidth(displayed + "…") > width) {
+            displayed = displayed.substring(0, displayed.length() - 1);
+        }
+        if (!displayed.equals(text)) {
+            displayed += "…";
+        }
+        int textX = x + Math.max(0, (width - metrics.stringWidth(displayed)) / 2);
+        g.drawString(displayed, textX, y + metrics.getAscent());
+    }
+
     private void drawNode(Graphics2D g, CallGraphLayout.Node visual) {
         CallGraphNode node = visual.node();
         Composite originalComposite = g.getComposite();
@@ -283,39 +388,178 @@ public final class CallGraphCanvas extends JComponent {
         g.setColor(contrastColor(fill));
         Font original = g.getFont();
         g.setFont(original.deriveFont(Font.BOLD));
-        drawCenteredEllipsized(g, node.label(), visual.x() + 10, visual.y() + 10, NODE_WIDTH - 20);
+        drawCenteredEllipsized(
+                g,
+                node.label(),
+                visual.x() + 10,
+                visual.y() + 10,
+                NODE_WIDTH - 20 - GraphNodeControls.reservedWidth()
+        );
         g.setFont(original.deriveFont(Math.max(10f, original.getSize2D() - 1f)));
         drawCenteredEllipsized(g, kindLabel(node.kind()), visual.x() + 10, visual.y() + 32, NODE_WIDTH - 20);
         g.setFont(original);
+        GraphNodeControls.Action hovered = hoveredControl != null
+                && hoveredControl.node().id().equals(node.id())
+                ? hoveredControl.action()
+                : null;
+        GraphNodeControls.paint(
+                g,
+                visual.x(),
+                visual.y(),
+                NODE_WIDTH,
+                hovered,
+                selectedNode != null
+                        && selectedNode.id().equals(node.id())
+                        && !focusedNodeIds.isEmpty()
+        );
         g.setComposite(originalComposite);
     }
 
-    private void drawCenteredEllipsized(Graphics2D g, String text, int x, int y, int width) {
-        FontMetrics metrics = g.getFontMetrics();
-        String displayed = text;
-        while (displayed.length() > 3 && metrics.stringWidth(displayed + "…") > width) {
-            displayed = displayed.substring(0, displayed.length() - 1);
-        }
-        if (!displayed.equals(text)) {
-            displayed += "…";
-        }
-        int textX = x + Math.max(0, (width - metrics.stringWidth(displayed)) / 2);
-        g.drawString(displayed, textX, y + metrics.getAscent());
-    }
-
-    private CallGraphNode findNode(Point point) {
-        Point transformed = new Point((int) (point.x / activeZoom()), (int) (point.y / activeZoom()));
+    private CallGraphLayout.Node findVisualNode(Point point) {
+        Point transformed = inverseTransform(point);
         for (int index = graphLayout.nodes().size() - 1; index >= 0; index--) {
             CallGraphLayout.Node visual = graphLayout.nodes().get(index);
             if (box(visual).contains(transformed)) {
-                return visual.node();
+                return visual;
             }
         }
         return null;
     }
 
+    private CallGraphNode findNode(Point point) {
+        CallGraphLayout.Node visual = findVisualNode(point);
+        return visual == null ? null : visual.node();
+    }
+
+    private NodeControl findNodeControl(Point point) {
+        Point transformed = inverseTransform(point);
+        CallGraphLayout.Node visual = findVisualNode(point);
+        if (visual == null) {
+            return null;
+        }
+        GraphNodeControls.Action action = GraphNodeControls.actionAt(
+                transformed,
+                visual.x(),
+                visual.y(),
+                NODE_WIDTH
+        );
+        return action == null ? null : new NodeControl(visual.node(), action);
+    }
+
+    private void activateControl(NodeControl control) {
+        if (control.action() == GraphNodeControls.Action.FOCUS) {
+            focusNode(control.node());
+            return;
+        }
+        if (focusConnectedNodes) {
+            selectNode(control.node(), false);
+        } else {
+            selectedNode = control.node();
+            repaint();
+        }
+        navigator.accept(control.node());
+    }
+
+    private void focusNode(CallGraphNode node) {
+        selectedNode = node;
+        repaint();
+        requestFocus(node, true);
+    }
+
+    private void updateHoveredControl(Point point) {
+        NodeControl hovered = findNodeControl(point);
+        if (sameControl(hoveredControl, hovered)) {
+            return;
+        }
+        hoveredControl = hovered;
+        repaint();
+    }
+
+    private void moveDraggedNode(MouseEvent event) {
+        if (draggedNode == null || dragOrigin == null) {
+            return;
+        }
+        if (!dragOccurred && dragOrigin.distance(event.getPoint()) < DRAG_THRESHOLD) {
+            return;
+        }
+
+        CallGraphLayout.Node current = graphLayout.nodes().stream()
+                .filter(visual -> visual.node().id().equals(draggedNode.id()))
+                .findFirst()
+                .orElse(null);
+        if (current == null) {
+            return;
+        }
+
+        dragOccurred = true;
+        selectedNode = draggedNode;
+        Point logicalPoint = inverseTransform(event.getPoint());
+        int x = Math.max(DRAG_MARGIN, logicalPoint.x - dragOffset.x);
+        int y = Math.max(DRAG_MARGIN, logicalPoint.y - dragOffset.y);
+        int deltaX = x - current.x();
+        int deltaY = y - current.y();
+        if (deltaX == 0 && deltaY == 0) {
+            return;
+        }
+
+        String draggedId = draggedNode.id();
+        graphLayout = graphLayout.moveNode(draggedId, x, y);
+        if (focusedNodeIds.isEmpty()) {
+            baseGraphLayout = graphLayout;
+        } else {
+            CallGraphLayout.Node baseNode = baseGraphLayout.nodes().stream()
+                    .filter(visual -> visual.node().id().equals(draggedId))
+                    .findFirst()
+                    .orElse(null);
+            if (baseNode != null) {
+                baseGraphLayout = baseGraphLayout.moveNode(
+                        draggedId,
+                        Math.max(DRAG_MARGIN, baseNode.x() + deltaX),
+                        Math.max(DRAG_MARGIN, baseNode.y() + deltaY)
+                );
+            }
+            refreshFocusBounds();
+        }
+        setCursor(Cursor.getPredefinedCursor(Cursor.MOVE_CURSOR));
+        updateCanvasSize();
+        repaint();
+    }
+
+    private void refreshFocusBounds() {
+        Rectangle bounds = null;
+        for (CallGraphLayout.Node visual : graphLayout.nodes()) {
+            if (!focusedNodeIds.contains(visual.node().id())) {
+                continue;
+            }
+            bounds = bounds == null ? visual.bounds() : bounds.union(visual.bounds());
+        }
+        if (bounds == null) {
+            focusBounds = new Rectangle();
+            return;
+        }
+        bounds.grow(45, 45);
+        focusBounds = bounds;
+    }
+
+    private void updateCursor(Point point) {
+        if (findNodeControl(point) != null) {
+            setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        } else if (findVisualNode(point) != null) {
+            setCursor(Cursor.getPredefinedCursor(Cursor.MOVE_CURSOR));
+        } else {
+            setCursor(Cursor.getDefaultCursor());
+        }
+    }
+
+    private Point inverseTransform(Point point) {
+        return new Point((int) (point.x / activeZoom()), (int) (point.y / activeZoom()));
+    }
+
     private void selectNode(CallGraphNode node, boolean scrollToNode) {
         if (selectedNode == node) {
+            if (focusConnectedNodes && node != null && focusedNodeIds.isEmpty()) {
+                requestFocus(node);
+            }
             if (scrollToNode) {
                 revealSelection(node);
             }
@@ -348,6 +592,10 @@ public final class CallGraphCanvas extends JComponent {
     }
 
     private void requestFocus(CallGraphNode node) {
+        requestFocus(node, false);
+    }
+
+    private void requestFocus(CallGraphNode node, boolean explicit) {
         long requestId = ++focusRequestId;
         CallGraphLayout sourceLayout = baseGraphLayout;
         String selectedId = node.id();
@@ -355,7 +603,7 @@ public final class CallGraphCanvas extends JComponent {
             CallGraphLayout.Focus focus = sourceLayout.focus(selectedId);
             SwingUtilities.invokeLater(() -> {
                 if (requestId != focusRequestId
-                        || !focusConnectedNodes
+                        || (!explicit && !focusConnectedNodes)
                         || selectedNode == null
                         || !selectedId.equals(selectedNode.id())) {
                     return;
@@ -431,6 +679,12 @@ public final class CallGraphCanvas extends JComponent {
 
     @Override
     public String getToolTipText(MouseEvent event) {
+        NodeControl control = findNodeControl(event.getPoint());
+        if (control != null) {
+            return AstLensBundle.message(control.action() == GraphNodeControls.Action.FOCUS
+                    ? "graph.node.action.focus"
+                    : "graph.node.action.navigate");
+        }
         CallGraphNode node = findNode(event.getPoint());
         return node == null
                 ? null
@@ -442,5 +696,8 @@ public final class CallGraphCanvas extends JComponent {
     }
 
     private record PointD(double x, double y) {
+    }
+
+    private record NodeControl(CallGraphNode node, GraphNodeControls.Action action) {
     }
 }

@@ -6,13 +6,17 @@ import com.aelqsimi.ast.model.CallGraphEdge;
 import com.aelqsimi.ast.model.CallGraphNode;
 import org.junit.Test;
 
+import javax.swing.*;
 import java.awt.*;
+import java.awt.event.MouseEvent;
+import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.Assert.*;
 
@@ -37,6 +41,102 @@ public class GraphLayoutTest {
         }
         AstNode type = new AstNode(AstNode.Kind.CLASS, "Sample", 0, 100, methods);
         return new AstNode(AstNode.Kind.FILE, "Sample.java", 0, 100, List.of(type));
+    }
+
+    private static void drag(JComponent component, Point start, Point end) {
+        component.dispatchEvent(mouseEvent(
+                component,
+                MouseEvent.MOUSE_PRESSED,
+                start,
+                1,
+                MouseEvent.BUTTON1,
+                MouseEvent.BUTTON1_DOWN_MASK
+        ));
+        component.dispatchEvent(mouseEvent(
+                component,
+                MouseEvent.MOUSE_DRAGGED,
+                end,
+                0,
+                MouseEvent.NOBUTTON,
+                MouseEvent.BUTTON1_DOWN_MASK
+        ));
+        component.dispatchEvent(mouseEvent(
+                component,
+                MouseEvent.MOUSE_RELEASED,
+                end,
+                1,
+                MouseEvent.BUTTON1,
+                0
+        ));
+    }
+
+    private static void click(JComponent component, Point point) {
+        component.dispatchEvent(mouseEvent(
+                component,
+                MouseEvent.MOUSE_PRESSED,
+                point,
+                1,
+                MouseEvent.BUTTON1,
+                MouseEvent.BUTTON1_DOWN_MASK
+        ));
+        component.dispatchEvent(mouseEvent(
+                component,
+                MouseEvent.MOUSE_RELEASED,
+                point,
+                1,
+                MouseEvent.BUTTON1,
+                0
+        ));
+        component.dispatchEvent(mouseEvent(
+                component,
+                MouseEvent.MOUSE_CLICKED,
+                point,
+                1,
+                MouseEvent.BUTTON1,
+                0
+        ));
+    }
+
+    private static Point center(Rectangle rectangle) {
+        return new Point(
+                rectangle.x + rectangle.width / 2,
+                rectangle.y + rectangle.height / 2
+        );
+    }
+
+    private static void paintOffscreen(JComponent component) {
+        BufferedImage image = new BufferedImage(
+                component.getWidth(),
+                component.getHeight(),
+                BufferedImage.TYPE_INT_ARGB
+        );
+        Graphics2D graphics = image.createGraphics();
+        try {
+            component.paint(graphics);
+        } finally {
+            graphics.dispose();
+        }
+    }
+
+    private static MouseEvent mouseEvent(
+            Component component,
+            int id,
+            Point point,
+            int clickCount,
+            int button,
+            int modifiers
+    ) {
+        return new MouseEvent(
+                component,
+                id,
+                System.currentTimeMillis(),
+                modifiers,
+                point.x,
+                point.y,
+                clickCount,
+                false,
+                button
+        );
     }
 
     @Test
@@ -158,6 +258,198 @@ public class GraphLayoutTest {
                 selected.x()
         );
         assertTrue(focus.bounds().contains(selected.bounds()));
+    }
+
+    @Test
+    public void movingAnAstNodeKeepsItsEdgesConnected() {
+        AstNode root = astTree();
+        AstNode movedModel = root.children().getFirst();
+        AstGraphLayout original = AstGraphLayout.calculate(root);
+        int x = original.logicalSize().width + 120;
+        int y = original.logicalSize().height + 80;
+
+        AstGraphLayout moved = original.moveNode(movedModel, x, y);
+
+        AstGraphLayout.Node movedVisual = moved.nodes().stream()
+                .filter(node -> node.node() == movedModel)
+                .findFirst()
+                .orElseThrow();
+        AstGraphLayout.Edge connectedEdge = moved.edges().stream()
+                .filter(edge -> edge.child().node() == movedModel)
+                .findFirst()
+                .orElseThrow();
+        assertEquals(x, movedVisual.x());
+        assertEquals(y, movedVisual.y());
+        assertSame(movedVisual, connectedEdge.child());
+        assertTrue(moved.logicalSize().width >= x + AstGraphLayout.NODE_WIDTH);
+        assertTrue(moved.logicalSize().height >= y + AstGraphLayout.NODE_HEIGHT);
+    }
+
+    @Test
+    public void movingACallGraphNodeKeepsEdgeMetadataAndEndpoints() {
+        CallGraphNode source = new CallGraphNode(
+                "source",
+                "source()",
+                CallGraphNode.Kind.INTERNAL,
+                null,
+                0,
+                10
+        );
+        CallGraphNode target = new CallGraphNode(
+                "target",
+                "target()",
+                CallGraphNode.Kind.INTERNAL,
+                null,
+                11,
+                20
+        );
+        CallGraphLayout original = CallGraphLayout.calculate(new CallGraph(
+                List.of(source, target),
+                List.of(new CallGraphEdge("source", "target", 3, "calls"))
+        ));
+        int x = original.logicalSize().width + 150;
+        int y = original.logicalSize().height + 90;
+
+        CallGraphLayout moved = original.moveNode("target", x, y);
+
+        CallGraphLayout.Node movedVisual = moved.nodes().stream()
+                .filter(node -> node.node().id().equals("target"))
+                .findFirst()
+                .orElseThrow();
+        CallGraphLayout.Edge connectedEdge = moved.edges().getFirst();
+        assertEquals(x, movedVisual.x());
+        assertEquals(y, movedVisual.y());
+        assertSame(movedVisual, connectedEdge.target());
+        assertEquals(3, connectedEdge.callCount());
+        assertEquals("calls", connectedEdge.label());
+        assertTrue(moved.logicalSize().width >= x + CallGraphLayout.NODE_WIDTH);
+        assertTrue(moved.logicalSize().height >= y + CallGraphLayout.NODE_HEIGHT);
+    }
+
+    @Test
+    public void astCanvasDragsNodesWithoutTriggeringNavigation() throws Exception {
+        AtomicInteger navigationCount = new AtomicInteger();
+        SwingUtilities.invokeAndWait(() -> {
+            AstGraphLayout layout = AstGraphLayout.calculate(astTree());
+            AstGraphCanvas canvas = new AstGraphCanvas(node -> navigationCount.incrementAndGet());
+            canvas.setLayout(layout);
+            canvas.setSize(canvas.getPreferredSize());
+            AstGraphLayout.Node visual = layout.nodes().getFirst();
+            Point start = new Point(visual.x() + 20, visual.y() + 20);
+            Point end = new Point(layout.logicalSize().width + 240, layout.logicalSize().height + 180);
+            Dimension initialSize = canvas.getPreferredSize();
+
+            drag(canvas, start, end);
+            canvas.dispatchEvent(mouseEvent(canvas, MouseEvent.MOUSE_CLICKED, end, 2, MouseEvent.BUTTON1, 0));
+
+            assertTrue(canvas.getPreferredSize().width > initialSize.width);
+            assertTrue(canvas.getPreferredSize().height > initialSize.height);
+            assertEquals(Cursor.MOVE_CURSOR, canvas.getCursor().getType());
+            assertEquals(0, navigationCount.get());
+        });
+    }
+
+    @Test
+    public void callGraphCanvasDragsNodesAndExpandsItsViewport() throws Exception {
+        AtomicInteger navigationCount = new AtomicInteger();
+        SwingUtilities.invokeAndWait(() -> {
+            CallGraphNode source = new CallGraphNode(
+                    "source", "source()", CallGraphNode.Kind.INTERNAL, null, 0, 10
+            );
+            CallGraphNode target = new CallGraphNode(
+                    "target", "target()", CallGraphNode.Kind.INTERNAL, null, 11, 20
+            );
+            CallGraphLayout layout = CallGraphLayout.calculate(new CallGraph(
+                    List.of(source, target),
+                    List.of(new CallGraphEdge("source", "target", 1, "calls"))
+            ));
+            CallGraphCanvas canvas = new CallGraphCanvas(node -> navigationCount.incrementAndGet());
+            canvas.setLayout(layout);
+            canvas.setSize(canvas.getPreferredSize());
+            CallGraphLayout.Node visual = layout.nodes().getFirst();
+            Point start = new Point(visual.x() + 20, visual.y() + 20);
+            Point end = new Point(layout.logicalSize().width + 260, layout.logicalSize().height + 200);
+            Dimension initialSize = canvas.getPreferredSize();
+
+            drag(canvas, start, end);
+            canvas.dispatchEvent(mouseEvent(canvas, MouseEvent.MOUSE_CLICKED, end, 2, MouseEvent.BUTTON1, 0));
+
+            assertTrue(canvas.getPreferredSize().width > initialSize.width);
+            assertTrue(canvas.getPreferredSize().height > initialSize.height);
+            assertEquals(Cursor.MOVE_CURSOR, canvas.getCursor().getType());
+            assertEquals(0, navigationCount.get());
+        });
+    }
+
+    @Test
+    public void astNodeGoToCodeControlNavigatesWithoutStartingADrag() throws Exception {
+        AtomicInteger navigationCount = new AtomicInteger();
+        SwingUtilities.invokeAndWait(() -> {
+            AstGraphLayout layout = AstGraphLayout.calculate(astTree());
+            AstGraphCanvas canvas = new AstGraphCanvas(node -> navigationCount.incrementAndGet());
+            canvas.setLayout(layout);
+            canvas.setSize(canvas.getPreferredSize());
+            AstGraphLayout.Node visual = layout.nodes().getFirst();
+            Rectangle controlBounds = GraphNodeControls.bounds(
+                    GraphNodeControls.Action.NAVIGATE,
+                    visual.x(),
+                    visual.y(),
+                    AstGraphLayout.NODE_WIDTH
+            );
+            Point control = center(controlBounds);
+            Dimension initialSize = canvas.getPreferredSize();
+
+            canvas.dispatchEvent(mouseEvent(
+                    canvas,
+                    MouseEvent.MOUSE_MOVED,
+                    control,
+                    0,
+                    MouseEvent.NOBUTTON,
+                    0
+            ));
+            click(canvas, control);
+            paintOffscreen(canvas);
+
+            assertEquals(Cursor.HAND_CURSOR, canvas.getCursor().getType());
+            assertEquals(initialSize, canvas.getPreferredSize());
+            assertEquals(1, navigationCount.get());
+        });
+    }
+
+    @Test
+    public void callGraphNodeControlsNeverStartDraggingTheNode() throws Exception {
+        AtomicInteger navigationCount = new AtomicInteger();
+        SwingUtilities.invokeAndWait(() -> {
+            CallGraphNode node = new CallGraphNode(
+                    "source", "source()", CallGraphNode.Kind.INTERNAL, null, 0, 10
+            );
+            CallGraphLayout layout = CallGraphLayout.calculate(new CallGraph(List.of(node), List.of()));
+            CallGraphCanvas canvas = new CallGraphCanvas(ignored -> navigationCount.incrementAndGet());
+            canvas.setLayout(layout);
+            canvas.setSize(canvas.getPreferredSize());
+            CallGraphLayout.Node visual = layout.nodes().getFirst();
+            Point focusControl = center(GraphNodeControls.bounds(
+                    GraphNodeControls.Action.FOCUS,
+                    visual.x(),
+                    visual.y(),
+                    CallGraphLayout.NODE_WIDTH
+            ));
+            Point farAway = new Point(layout.logicalSize().width + 300, layout.logicalSize().height + 240);
+            Dimension initialSize = canvas.getPreferredSize();
+
+            drag(canvas, focusControl, farAway);
+            canvas.dispatchEvent(mouseEvent(
+                    canvas,
+                    MouseEvent.MOUSE_CLICKED,
+                    farAway,
+                    1,
+                    MouseEvent.BUTTON1,
+                    0
+            ));
+
+            assertEquals(initialSize, canvas.getPreferredSize());
+            assertEquals(0, navigationCount.get());
+        });
     }
 
     @Test

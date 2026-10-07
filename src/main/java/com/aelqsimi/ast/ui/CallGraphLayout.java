@@ -168,6 +168,44 @@ final class CallGraphLayout {
         return new Dimension(logicalSize);
     }
 
+    CallGraphLayout moveNode(String nodeId, int x, int y) {
+        Map<String, Node> movedNodesById = new LinkedHashMap<>();
+        List<Node> movedNodes = new ArrayList<>(nodes.size());
+        boolean found = false;
+        for (Node node : nodes) {
+            boolean target = node.node().id().equals(nodeId);
+            Node moved = target ? new Node(node.node(), x, y) : node;
+            found |= target;
+            movedNodes.add(moved);
+            movedNodesById.put(moved.node().id(), moved);
+        }
+        if (!found) {
+            return this;
+        }
+
+        List<Edge> movedEdges = edges.stream()
+                .map(edge -> new Edge(
+                        movedNodesById.get(edge.source().node().id()),
+                        movedNodesById.get(edge.target().node().id()),
+                        edge.callCount(),
+                        edge.label()
+                ))
+                .toList();
+        int width = movedNodes.stream()
+                .mapToInt(node -> node.x() + NODE_WIDTH + MARGIN)
+                .max()
+                .orElse(logicalSize.width);
+        int height = movedNodes.stream()
+                .mapToInt(node -> node.y() + NODE_HEIGHT + MARGIN)
+                .max()
+                .orElse(logicalSize.height);
+        return new CallGraphLayout(
+                movedNodes,
+                movedEdges,
+                new Dimension(Math.max(logicalSize.width, width), Math.max(logicalSize.height, height))
+        );
+    }
+
     Focus focus(String selectedId) {
         Node selected = nodes.stream()
                 .filter(node -> node.node().id().equals(selectedId))
