@@ -26,4 +26,4 @@ their own privacy terms independently of AST Lens.
 
 ## Contact
 
-For privacy questions, contact Abdelmounaim EL QSIMI at a.elqsimi.pro@gmail.com.
+For privacy questions, contact Abdelmounaim EL QSIMI at aelqsimi.pro@gmail.com.

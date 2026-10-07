@@ -10,7 +10,7 @@ plugins {
 }
 
 group = "com.aelqsimi.ast"
-version = "0.1.0"
+version = "0.2.0"
 
 repositories {
     mavenCentral()
@@ -166,6 +166,10 @@ val performanceTest = intellijPlatformTesting.testIde.register("performanceTest"
 }
 
 tasks {
+    named("verifyPluginSignature") {
+        dependsOn("signPlugin")
+    }
+
     named<VerifyPluginTask>("verifyPlugin") {
         if (providers.systemProperty("os.name").get().startsWith("Windows", ignoreCase = true)) {
             systemProperty("javax.net.ssl.trustStoreType", "Windows-ROOT")
