@@ -19,6 +19,8 @@ and understanding unfamiliar codebases.
 
 ## Try the plugin
 
+Marketplace : https://plugins.jetbrains.com/plugin/34773-ast-lens/ast-lens
+
 1. Open the project in IntelliJ IDEA.
 2. Synchronize the Gradle project if IntelliJ IDEA does not do so automatically.
 3. Run the Gradle task `intellij platform > runIde`.
