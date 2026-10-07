@@ -19,6 +19,8 @@ import java.util.function.Consumer;
 public final class AstGraphCanvas extends JComponent {
     private static final int NODE_WIDTH = AstGraphLayout.NODE_WIDTH;
     private static final int NODE_HEIGHT = AstGraphLayout.NODE_HEIGHT;
+    private static final int DRAG_THRESHOLD = 3;
+    private static final int DRAG_MARGIN = 12;
 
     private final Consumer<AstNode> navigator;
     private AstGraphLayout baseGraphLayout = AstGraphLayout.empty();
@@ -30,22 +32,99 @@ public final class AstGraphCanvas extends JComponent {
     private Rectangle focusBounds = new Rectangle();
     private long focusRequestId;
     private AstNode selectedNode;
+    private AstNode draggedNode;
+    private Point dragOffset = new Point();
+    private Point dragOrigin;
+    private boolean dragOccurred;
+    private NodeControl pressedControl;
+    private NodeControl hoveredControl;
 
     public AstGraphCanvas(Consumer<AstNode> navigator) {
         this.navigator = navigator;
         setOpaque(true);
         setBackground(JBColor.namedColor("Editor.background", new JBColor(0xFFFFFF, 0x1E1F22)));
         setToolTipText("");
-        addMouseListener(new MouseAdapter() {
+        MouseAdapter mouseHandler = new MouseAdapter() {
+            @Override
+            public void mousePressed(MouseEvent event) {
+                dragOccurred = false;
+                pressedControl = null;
+                if (!SwingUtilities.isLeftMouseButton(event)) {
+                    return;
+                }
+                NodeControl control = findNodeControl(event.getPoint());
+                if (control != null) {
+                    pressedControl = control;
+                    draggedNode = null;
+                    dragOrigin = null;
+                    return;
+                }
+                AstGraphLayout.Node visual = findVisualNode(event.getPoint());
+                if (visual == null) {
+                    return;
+                }
+                focusRequestId++;
+                draggedNode = visual.node();
+                Point logicalPoint = inverseTransform(event.getPoint());
+                dragOffset = new Point(logicalPoint.x - visual.x(), logicalPoint.y - visual.y());
+                dragOrigin = event.getPoint();
+            }
+
+            @Override
+            public void mouseDragged(MouseEvent event) {
+                moveDraggedNode(event);
+            }
+
+            @Override
+            public void mouseReleased(MouseEvent event) {
+                if (draggedNode == null) {
+                    return;
+                }
+                draggedNode = null;
+                dragOrigin = null;
+                updateCursor(event.getPoint());
+            }
+
             @Override
             public void mouseClicked(MouseEvent event) {
+                if (pressedControl != null) {
+                    NodeControl releasedControl = findNodeControl(event.getPoint());
+                    NodeControl control = pressedControl;
+                    pressedControl = null;
+                    if (sameControl(control, releasedControl)) {
+                        activateControl(control);
+                    }
+                    event.consume();
+                    return;
+                }
+                if (dragOccurred) {
+                    dragOccurred = false;
+                    event.consume();
+                    return;
+                }
                 AstNode clicked = findNode(event.getPoint());
                 selectNode(clicked, false);
-                if (clicked != null && event.getClickCount() == 2) {
-                    navigator.accept(clicked);
+            }
+
+            @Override
+            public void mouseMoved(MouseEvent event) {
+                updateHoveredControl(event.getPoint());
+                updateCursor(event.getPoint());
+            }
+
+            @Override
+            public void mouseExited(MouseEvent event) {
+                if (draggedNode == null) {
+                    setCursor(Cursor.getDefaultCursor());
+                }
+                if (hoveredControl != null) {
+                    hoveredControl = null;
+                    repaint();
                 }
             }
-        });
+        };
+        addMouseListener(mouseHandler);
+        addMouseMotionListener(mouseHandler);
     }
 
     private static String kindLabel(AstNode.Kind kind) {
@@ -69,16 +148,11 @@ public final class AstGraphCanvas extends JComponent {
         return luminance < 128 ? Color.WHITE : new Color(0x202124);
     }
 
-    void setLayout(AstGraphLayout layout) {
-        baseGraphLayout = layout == null ? AstGraphLayout.empty() : layout;
-        graphLayout = baseGraphLayout;
-        focusRequestId++;
-        focusedNodes = Set.of();
-        focusBounds = new Rectangle();
-        focusZoom = zoom;
-        selectedNode = null;
-        updateCanvasSize();
-        repaint();
+    private static boolean sameControl(NodeControl first, NodeControl second) {
+        return first != null
+                && second != null
+                && first.node() == second.node()
+                && first.action() == second.action();
     }
 
     public void setFocusConnectedNodes(boolean enabled) {
@@ -192,6 +266,37 @@ public final class AstGraphCanvas extends JComponent {
         g.setComposite(originalComposite);
     }
 
+    void setLayout(AstGraphLayout layout) {
+        baseGraphLayout = layout == null ? AstGraphLayout.empty() : layout;
+        graphLayout = baseGraphLayout;
+        focusRequestId++;
+        focusedNodes = Set.of();
+        focusBounds = new Rectangle();
+        focusZoom = zoom;
+        selectedNode = null;
+        draggedNode = null;
+        dragOrigin = null;
+        dragOccurred = false;
+        pressedControl = null;
+        hoveredControl = null;
+        setCursor(Cursor.getDefaultCursor());
+        updateCanvasSize();
+        repaint();
+    }
+
+    private void drawCenteredEllipsized(Graphics2D g, String text, int x, int y, int width) {
+        FontMetrics metrics = g.getFontMetrics();
+        String displayed = text;
+        while (displayed.length() > 3 && metrics.stringWidth(displayed + "…") > width) {
+            displayed = displayed.substring(0, displayed.length() - 1);
+        }
+        if (!displayed.equals(text)) {
+            displayed += "…";
+        }
+        int textX = x + Math.max(0, (width - metrics.stringWidth(displayed)) / 2);
+        g.drawString(displayed, textX, y + metrics.getAscent());
+    }
+
     private void drawNode(Graphics2D g, AstGraphLayout.Node visual) {
         AstNode node = visual.node();
         Composite originalComposite = g.getComposite();
@@ -220,40 +325,171 @@ public final class AstGraphCanvas extends JComponent {
         g.setColor(contrastColor(fill));
         Font originalFont = g.getFont();
         g.setFont(originalFont.deriveFont(Font.BOLD));
-        drawCenteredEllipsized(g, node.name(), visual.x() + 10, visual.y() + 10, NODE_WIDTH - 20);
+        drawCenteredEllipsized(
+                g,
+                node.name(),
+                visual.x() + 10,
+                visual.y() + 10,
+                NODE_WIDTH - 20 - GraphNodeControls.reservedWidth()
+        );
         g.setFont(originalFont.deriveFont(Math.max(10f, originalFont.getSize2D() - 1f)));
         drawCenteredEllipsized(g, kindLabel(node.kind()), visual.x() + 10, visual.y() + 31, NODE_WIDTH - 20);
         g.setFont(originalFont);
+        GraphNodeControls.Action hovered = hoveredControl != null && hoveredControl.node() == node
+                ? hoveredControl.action()
+                : null;
+        GraphNodeControls.paint(
+                g,
+                visual.x(),
+                visual.y(),
+                NODE_WIDTH,
+                hovered,
+                node == selectedNode && !focusedNodes.isEmpty()
+        );
         g.setComposite(originalComposite);
     }
 
-    private void drawCenteredEllipsized(Graphics2D g, String text, int x, int y, int width) {
-        FontMetrics metrics = g.getFontMetrics();
-        String displayed = text;
-        while (displayed.length() > 3 && metrics.stringWidth(displayed + "…") > width) {
-            displayed = displayed.substring(0, displayed.length() - 1);
-        }
-        if (!displayed.equals(text)) {
-            displayed += "…";
-        }
-        int textX = x + Math.max(0, (width - metrics.stringWidth(displayed)) / 2);
-        g.drawString(displayed, textX, y + metrics.getAscent());
-    }
-
-    private AstNode findNode(Point point) {
+    private AstGraphLayout.Node findVisualNode(Point point) {
         Point transformed = inverseTransform(point);
         for (int i = graphLayout.nodes().size() - 1; i >= 0; i--) {
             AstGraphLayout.Node visual = graphLayout.nodes().get(i);
             if (new RoundRectangle2D.Double(visual.x(), visual.y(), NODE_WIDTH, NODE_HEIGHT, 12, 12)
                     .contains(transformed)) {
-                return visual.node();
+                return visual;
             }
         }
         return null;
     }
 
+    private AstNode findNode(Point point) {
+        AstGraphLayout.Node visual = findVisualNode(point);
+        return visual == null ? null : visual.node();
+    }
+
+    private NodeControl findNodeControl(Point point) {
+        Point transformed = inverseTransform(point);
+        AstGraphLayout.Node visual = findVisualNode(point);
+        if (visual == null) {
+            return null;
+        }
+        GraphNodeControls.Action action = GraphNodeControls.actionAt(
+                transformed,
+                visual.x(),
+                visual.y(),
+                NODE_WIDTH
+        );
+        return action == null ? null : new NodeControl(visual.node(), action);
+    }
+
+    private void activateControl(NodeControl control) {
+        if (control.action() == GraphNodeControls.Action.FOCUS) {
+            focusNode(control.node());
+            return;
+        }
+        if (focusConnectedNodes) {
+            selectNode(control.node(), false);
+        } else {
+            selectedNode = control.node();
+            repaint();
+        }
+        navigator.accept(control.node());
+    }
+
+    private void focusNode(AstNode node) {
+        selectedNode = node;
+        repaint();
+        requestFocus(node, true);
+    }
+
+    private void updateHoveredControl(Point point) {
+        NodeControl hovered = findNodeControl(point);
+        if (sameControl(hoveredControl, hovered)) {
+            return;
+        }
+        hoveredControl = hovered;
+        repaint();
+    }
+
+    private void moveDraggedNode(MouseEvent event) {
+        if (draggedNode == null || dragOrigin == null) {
+            return;
+        }
+        if (!dragOccurred && dragOrigin.distance(event.getPoint()) < DRAG_THRESHOLD) {
+            return;
+        }
+
+        AstGraphLayout.Node current = graphLayout.nodes().stream()
+                .filter(visual -> visual.node() == draggedNode)
+                .findFirst()
+                .orElse(null);
+        if (current == null) {
+            return;
+        }
+
+        dragOccurred = true;
+        selectedNode = draggedNode;
+        Point logicalPoint = inverseTransform(event.getPoint());
+        int x = Math.max(DRAG_MARGIN, logicalPoint.x - dragOffset.x);
+        int y = Math.max(DRAG_MARGIN, logicalPoint.y - dragOffset.y);
+        int deltaX = x - current.x();
+        int deltaY = y - current.y();
+        if (deltaX == 0 && deltaY == 0) {
+            return;
+        }
+
+        graphLayout = graphLayout.moveNode(draggedNode, x, y);
+        if (focusedNodes.isEmpty()) {
+            baseGraphLayout = graphLayout;
+        } else {
+            AstGraphLayout.Node baseNode = baseGraphLayout.nodes().stream()
+                    .filter(visual -> visual.node() == draggedNode)
+                    .findFirst()
+                    .orElse(null);
+            if (baseNode != null) {
+                baseGraphLayout = baseGraphLayout.moveNode(
+                        draggedNode,
+                        Math.max(DRAG_MARGIN, baseNode.x() + deltaX),
+                        Math.max(DRAG_MARGIN, baseNode.y() + deltaY)
+                );
+            }
+            refreshFocusBounds();
+        }
+        setCursor(Cursor.getPredefinedCursor(Cursor.MOVE_CURSOR));
+        updateCanvasSize();
+        repaint();
+    }
+
+    private void refreshFocusBounds() {
+        Rectangle bounds = null;
+        for (AstGraphLayout.Node visual : graphLayout.nodes()) {
+            if (!focusedNodes.contains(visual.node())) {
+                continue;
+            }
+            bounds = bounds == null ? visual.bounds() : bounds.union(visual.bounds());
+        }
+        if (bounds == null) {
+            focusBounds = new Rectangle();
+            return;
+        }
+        bounds.grow(45, 45);
+        focusBounds = bounds;
+    }
+
+    private void updateCursor(Point point) {
+        if (findNodeControl(point) != null) {
+            setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        } else if (findVisualNode(point) != null) {
+            setCursor(Cursor.getPredefinedCursor(Cursor.MOVE_CURSOR));
+        } else {
+            setCursor(Cursor.getDefaultCursor());
+        }
+    }
+
     private void selectNode(AstNode node, boolean scrollToNode) {
         if (selectedNode == node) {
+            if (focusConnectedNodes && node != null && focusedNodes.isEmpty()) {
+                requestFocus(node);
+            }
             if (scrollToNode) {
                 revealSelection(node);
             }
@@ -286,12 +522,18 @@ public final class AstGraphCanvas extends JComponent {
     }
 
     private void requestFocus(AstNode node) {
+        requestFocus(node, false);
+    }
+
+    private void requestFocus(AstNode node, boolean explicit) {
         long requestId = ++focusRequestId;
         AstGraphLayout sourceLayout = baseGraphLayout;
         AppExecutorUtil.getAppExecutorService().execute(() -> {
             AstGraphLayout.Focus focus = sourceLayout.focus(node);
             SwingUtilities.invokeLater(() -> {
-                if (requestId != focusRequestId || !focusConnectedNodes || selectedNode != node) {
+                if (requestId != focusRequestId
+                        || (!explicit && !focusConnectedNodes)
+                        || selectedNode != node) {
                     return;
                 }
                 graphLayout = focus.layout();
@@ -372,8 +614,17 @@ public final class AstGraphCanvas extends JComponent {
 
     @Override
     public String getToolTipText(MouseEvent event) {
+        NodeControl control = findNodeControl(event.getPoint());
+        if (control != null) {
+            return AstLensBundle.message(control.action() == GraphNodeControls.Action.FOCUS
+                    ? "graph.node.action.focus"
+                    : "graph.node.action.navigate");
+        }
         AstNode node = findNode(event.getPoint());
         return node == null ? null : AstLensBundle.message("graph.tooltip", kindLabel(node.kind()), node.name());
+    }
+
+    private record NodeControl(AstNode node, GraphNodeControls.Action action) {
     }
 
 }

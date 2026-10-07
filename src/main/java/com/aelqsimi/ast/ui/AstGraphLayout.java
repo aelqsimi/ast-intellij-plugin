@@ -91,6 +91,43 @@ final class AstGraphLayout {
         return new Dimension(logicalSize);
     }
 
+    AstGraphLayout moveNode(AstNode model, int x, int y) {
+        Map<AstNode, Node> movedNodesByModel = new IdentityHashMap<>();
+        List<Node> movedNodes = new ArrayList<>(nodes.size());
+        boolean found = false;
+        for (Node node : nodes) {
+            Node moved = node.node() == model
+                    ? new Node(node.node(), x, y, node.depth())
+                    : node;
+            found |= node.node() == model;
+            movedNodes.add(moved);
+            movedNodesByModel.put(moved.node(), moved);
+        }
+        if (!found) {
+            return this;
+        }
+
+        List<Edge> movedEdges = edges.stream()
+                .map(edge -> new Edge(
+                        movedNodesByModel.get(edge.parent().node()),
+                        movedNodesByModel.get(edge.child().node())
+                ))
+                .toList();
+        int width = movedNodes.stream()
+                .mapToInt(node -> node.x() + NODE_WIDTH + MARGIN)
+                .max()
+                .orElse(logicalSize.width);
+        int height = movedNodes.stream()
+                .mapToInt(node -> node.y() + NODE_HEIGHT + MARGIN)
+                .max()
+                .orElse(logicalSize.height);
+        return new AstGraphLayout(
+                movedNodes,
+                movedEdges,
+                new Dimension(Math.max(logicalSize.width, width), Math.max(logicalSize.height, height))
+        );
+    }
+
     Focus focus(AstNode selectedNode) {
         Node selected = nodes.stream()
                 .filter(node -> node.node() == selectedNode)

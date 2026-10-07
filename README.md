@@ -25,9 +25,9 @@ and understanding unfamiliar codebases.
 4. Open a Java or Kotlin file.
 5. Open **AST Lens** from the tool window bar or choose **Tools > Open AST Lens**.
 6. Click **Analyze**, then select **Structure**, **Call graph**, **Class dependencies**, **Package dependencies**, or
-   **PSI / UAST comparison**. Double-click a node to open
-   its source code. Moving the caret in the editor automatically selects and centers the
-   corresponding node in the graph.
+   **PSI / UAST comparison**. Each node provides a focus button and a go-to-code button. Moving the
+   caret in the editor automatically selects and centers the corresponding node in the graph. Drag
+   the rest of a node to rearrange the view manually; its connected edges follow it in real time.
 
 The PSI/UAST comparison can hide whitespace and comments, punctuation, imports, and
 synthetic UAST nodes.
