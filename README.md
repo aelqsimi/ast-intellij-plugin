@@ -1,5 +1,7 @@
 # AST Lens — IntelliJ Plugin
 
+[![Release](https://github.com/aelqsimi/ast-intellij-plugin/actions/workflows/release.yml/badge.svg)](https://github.com/aelqsimi/ast-intellij-plugin/actions/workflows/release.yml)
+
 Visualize Java and Kotlin code as AST graphs.
 
 AST Lens helps developers inspect source-code structure directly from the IDE by transforming
@@ -17,7 +19,6 @@ and understanding unfamiliar codebases.
 
 ![ATS Lens Image](https://github.com/aelqsimi/ast-intellij-plugin/blob/develop/ASTLens%20.png?raw=true)
 
-[![Release](https://github.com/aelqsimi/ast-intellij-plugin/actions/workflows/release.yml/badge.svg)](https://github.com/aelqsimi/ast-intellij-plugin/actions/workflows/release.yml)
 
 ## Try the plugin
 
